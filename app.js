@@ -127,7 +127,8 @@ function searchWords(raw, level) {
 }
 function viewDict() {
   const v = $("#view");
-  v.innerHTML = '<h1>단어장</h1><div class="bar"><input id="q" type="search" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="간체, 병음, 한국어 뜻  예: 做梦, zuomeng, 꿈" aria-label="단어 검색">' +
+  v.innerHTML = '<h1>단어장</h1><div class="bar"><div class="qwrap"><input id="q" type="search" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="간체, 병음, 한국어 뜻  예: 做梦, zuomeng, 꿈" aria-label="단어 검색">' +
+    '<button type="button" class="qclear" id="qclear" aria-label="검색어 지우기" hidden><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>' +
     '<div class="chips" id="lv"></div></div><div class="count" id="count" aria-live="polite"></div><div id="list"></div><div class="btns"><button class="btn sec" id="more" hidden>더 보기</button></div>';
   const q = $("#q"); q.value = dict.q;
   const lv = $("#lv");
@@ -138,7 +139,12 @@ function viewDict() {
     lv.append(b);
   });
   let timer;
-  q.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { dict.q = q.value; dict.shown = 20; renderDict(); }, 120); });
+  const clr = $("#qclear");
+  const syncClear = () => { clr.hidden = q.value === ""; };
+  syncClear();
+  q.addEventListener("input", () => { syncClear(); clearTimeout(timer); timer = setTimeout(() => { dict.q = q.value; dict.shown = 20; renderDict(); }, 120); });
+  // 지우기: 입력칸을 비우고 바로 결과를 갱신한 뒤, 키보드가 계속 열려 있도록 입력칸에 포커스를 돌려준다.
+  clr.addEventListener("click", () => { clearTimeout(timer); q.value = ""; dict.q = ""; dict.shown = 20; syncClear(); renderDict(); q.focus(); });
   $("#more").onclick = () => { dict.shown += 20; renderDict(); };
   renderDict();
 }

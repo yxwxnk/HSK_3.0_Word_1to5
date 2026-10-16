@@ -1,5 +1,5 @@
 // 오프라인 캐시. 파일을 바꿔 다시 올릴 때는 VERSION 숫자를 올려야 기기가 새 파일을 받는다.
-const VERSION = "v1";
+const VERSION = "v2";
 const CACHE = "hanyu-" + VERSION;
 const FILES = [
   "./", "index.html", "app.js", "manifest.webmanifest",
