@@ -16,7 +16,7 @@ const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/, HANGUL = /[\u1100-\u11f
 const queryKind = (q) => (CJK.test(q) ? "chinese" : HANGUL.test(q) ? "korean" : "latin");
 
 /* ---------------------------------------------------------------- 저장소 (IndexedDB, 실패하면 메모리) */
-const DEFAULTS = { levels: [1], perDay: 20, direction: "alternate", retention: 0.9 };
+const DEFAULTS = { levels: [1], perDay: 20, direction: "alternate", retention: 0.9, scope: "levels" }; // scope: levels=선택한 급수 전체, selected=내가 고른 단어만
 let idb = null, persistent = true;
 const mem = { cards: new Map(), log: [], kv: new Map() };
 
@@ -46,14 +46,18 @@ async function loadAll() {
   idb = await openDb();
   if (!idb) { persistent = false; return; }
   try {
-    const [cards, log, settings] = await Promise.all([
+    const [cards, log, settings, examples, selected] = await Promise.all([
       tx("cards", "readonly", (s) => s.getAll()),
       tx("log", "readonly", (s) => s.getAll()),
       tx("kv", "readonly", (s) => s.get("settings")),
+      tx("kv", "readonly", (s) => s.get("examples")),
+      tx("kv", "readonly", (s) => s.get("selected")),
     ]);
     cards.forEach((c) => mem.cards.set(c.key, c));
     mem.log = log;
     if (settings) mem.kv.set("settings", settings);
+    if (examples) mem.kv.set("examples", examples);
+    if (selected) mem.kv.set("selected", selected);
   } catch { persistent = false; }
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch { /* 무시 */ }
 }
@@ -61,6 +65,19 @@ async function saveCard(c) { mem.cards.set(c.key, c); if (idb && persistent) try
 async function saveLog(l) { mem.log.push(l); if (idb && persistent) try { await tx("log", "readwrite", (s) => s.add(l)); } catch { persistent = false; } }
 async function saveSettings(v) { mem.kv.set("settings", v); if (idb && persistent) try { await tx("kv", "readwrite", (s) => s.put(v, "settings")); } catch { persistent = false; } }
 const settings = () => ({ ...DEFAULTS, ...(mem.kv.get("settings") || {}) });
+
+/* 내가 직접 넣은 예문: { 단어ref: [{ id, zh, ko, updated }] } — 설정과 같은 저장소(kv)에 한 덩어리로 저장한다. */
+const allExamples = () => mem.kv.get("examples") || {};
+const examplesOf = (ref) => allExamples()[ref] || [];
+async function saveExamples(v) { mem.kv.set("examples", v); if (idb && persistent) try { await tx("kv", "readwrite", (s) => s.put(v, "examples")); } catch { persistent = false; } }
+/* 복습 대상으로 고른 단어: { 단어ref: true } */
+const selectedMap = () => mem.kv.get("selected") || {};
+const isSel = (ref) => !!selectedMap()[ref];
+const selectedCount = () => Object.keys(selectedMap()).length;
+async function saveSelected(v) { mem.kv.set("selected", v); if (idb && persistent) try { await tx("kv", "readwrite", (s) => s.put(v, "selected")); } catch { persistent = false; } }
+const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const exState = { ref: null, id: null, delId: null }; // 열려 있는 입력 폼(id=null이면 새 예문), 삭제 확인 중인 예문
+function rerender() { if (currentTab === "dict") renderDict(); else if (currentTab === "review") drawReview(); }
 
 /* ---------------------------------------------------------------- 데이터 */
 let WORDS = [];
@@ -91,20 +108,76 @@ function markPinyin(py, q) {
   return esc(chars.slice(0, s).join("")) + "<mark>" + esc(chars.slice(s, e + 1).join("")) + "</mark>" + esc(chars.slice(e + 1).join(""));
 }
 function wordCard(w, q, kind) {
+  const on = isSel(w.r);
   return '<article class="card"><div class="head"><span class="hz" lang="zh-Hans">' +
     (kind === "chinese" ? mark(w.s, normZh(q)) : esc(w.s)) + "</span>" +
-    (w.t ? '<span class="tr" lang="zh-Hant">' + esc(w.t) + "</span>" : "") + "</div>" +
+    (w.t ? '<span class="tr" lang="zh-Hant">' + esc(w.t) + "</span>" : "") +
+    '<button type="button" class="star" data-ref="' + esc(w.r) + '" aria-pressed="' + on + '" aria-label="복습 대상으로 선택">' + (on ? "★" : "☆") + '<span>' + (on ? "복습 대상" : "복습에 추가") + "</span></button></div>" +
     '<p class="py">' + (kind === "latin" ? markPinyin(w.p, q) : esc(w.p)) + "</p>" +
     '<div class="lab">뜻</div><p class="mean">' + (kind === "korean" ? mark(w.m, q.trim()) : esc(w.m)) + "</p>" +
     '<div class="tags">' + (w.pos ? '<span class="tag">' + esc(w.pos) + "</span>" : "") + '<span class="tag hsk">HSK ' + w.h + "</span></div>" +
+    examplesHtml(w.r) +
     (w.c.length ? '<div class="lab">글자별 풀이</div><div class="tiles">' + tilesHtml(w) + "</div>" : "") + "</article>";
 }
+function exForm(ref, e) {
+  return '<form class="exform" data-ref="' + esc(ref) + '" data-id="' + esc(e ? e.id : "") + '">' +
+    '<label>중국어 예문<textarea name="zh" rows="2" maxlength="300" lang="zh-Hans" required placeholder="例: 我昨天做了一个好梦。">' + esc(e ? e.zh : "") + "</textarea></label>" +
+    '<label>한국어 번역 (선택)<input name="ko" maxlength="300" value="' + esc(e ? e.ko : "") + '" placeholder="예: 나는 어제 좋은 꿈을 꿨다."></label>' +
+    '<div class="btns" style="justify-content:flex-start"><button type="submit" class="btn sm">저장</button><button type="button" class="btn sec sm ex-cancel">취소</button></div></form>';
+}
+function examplesHtml(ref) {
+  const list = examplesOf(ref), open = exState.ref === ref;
+  let h = '<div class="lab">내 예문</div>';
+  h += list.map((e) => {
+    if (open && exState.id === e.id) return exForm(ref, e);
+    const del = exState.delId === e.id
+      ? '<span class="small">삭제할까요?</span><button type="button" class="lk danger ex-del-yes" data-ref="' + esc(ref) + '" data-id="' + esc(e.id) + '">삭제</button><button type="button" class="lk ex-del-no">취소</button>'
+      : '<button type="button" class="lk ex-edit" data-ref="' + esc(ref) + '" data-id="' + esc(e.id) + '">수정</button><button type="button" class="lk ex-del" data-ref="' + esc(ref) + '" data-id="' + esc(e.id) + '">삭제</button>';
+    return '<div class="ex"><p class="mean" lang="zh-Hans">' + esc(e.zh) + "</p>" + (e.ko ? '<p class="small muted">' + esc(e.ko) + "</p>" : "") + '<div class="ex-act">' + del + "</div></div>";
+  }).join("");
+  if (open && exState.id === null) h += exForm(ref, null);
+  else h += '<button type="button" class="btn sec sm ex-add" data-ref="' + esc(ref) + '">+ 예문 추가</button>';
+  return h;
+}
+document.addEventListener("click", (ev) => {
+  const b = ev.target.closest && ev.target.closest("button");
+  if (!b) return;
+  if (b.classList.contains("star")) {
+    const all = { ...selectedMap() }; if (all[b.dataset.ref]) delete all[b.dataset.ref]; else all[b.dataset.ref] = true;
+    saveSelected(all).then(rerender); return;
+  }
+  const ref = b.dataset.ref, id = b.dataset.id;
+  if (b.classList.contains("ex-add")) { exState.ref = ref; exState.id = null; exState.delId = null; }
+  else if (b.classList.contains("ex-edit")) { exState.ref = ref; exState.id = id; exState.delId = null; }
+  else if (b.classList.contains("ex-cancel")) { exState.ref = null; exState.id = null; }
+  else if (b.classList.contains("ex-del")) { exState.delId = id; }
+  else if (b.classList.contains("ex-del-no")) { exState.delId = null; }
+  else if (b.classList.contains("ex-del-yes")) {
+    const all = { ...allExamples() }; all[ref] = examplesOf(ref).filter((e) => e.id !== id); if (!all[ref].length) delete all[ref];
+    exState.delId = null; saveExamples(all).then(rerender); return;
+  } else return;
+  rerender();
+  const f = document.querySelector(".exform textarea"); if (f) f.focus();
+});
+document.addEventListener("submit", (ev) => {
+  const f = ev.target.closest && ev.target.closest(".exform");
+  if (!f) return;
+  ev.preventDefault();
+  const zh = f.elements.zh.value.trim(), ko = f.elements.ko.value.trim();
+  if (!zh) { f.elements.zh.focus(); return; }
+  const ref = f.dataset.ref, id = f.dataset.id, all = { ...allExamples() }, list = [...examplesOf(ref)];
+  if (id) { const i = list.findIndex((e) => e.id === id); if (i >= 0) list[i] = { ...list[i], zh, ko, updated: new Date().toISOString() }; }
+  else list.push({ id: newId(), zh, ko, updated: new Date().toISOString() });
+  all[ref] = list; exState.ref = null; exState.id = null;
+  saveExamples(all).then(rerender);
+});
 
 /* ---------------------------------------------------------------- 단어장 */
-const dict = { q: "", level: 0, shown: 20 };
+const dict = { q: "", level: 0, shown: 20, onlySel: false };
 function searchWords(raw, level) {
   const q = raw.trim();
   let pool = level ? WORDS.filter((w) => w.h === level) : WORDS;
+  if (dict.onlySel) pool = pool.filter((w) => isSel(w.r));
   if (!q) return { items: pool, kind: null };
   const kind = queryKind(q); let test, rank;
   if (kind === "chinese") {
@@ -129,9 +202,17 @@ function viewDict() {
   const v = $("#view");
   v.innerHTML = '<h1>단어장</h1><div class="bar"><div class="qwrap"><input id="q" type="search" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="간체, 병음, 한국어 뜻  예: 做梦, zuomeng, 꿈" aria-label="단어 검색">' +
     '<button type="button" class="qclear" id="qclear" aria-label="검색어 지우기" hidden><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>' +
-    '<div class="chips" id="lv"></div></div><div class="count" id="count" aria-live="polite"></div><div id="list"></div><div class="btns"><button class="btn sec" id="more" hidden>더 보기</button></div>';
+    '<div class="chips" id="lv"></div><div class="chips" id="selbar"></div></div><div class="count" id="count" aria-live="polite"></div><div id="list"></div><div class="btns"><button class="btn sec" id="more" hidden>더 보기</button></div>';
   const q = $("#q"); q.value = dict.q;
   const lv = $("#lv");
+  $("#selbar").onclick = (ev) => {
+    const b = ev.target.closest("button"); if (!b) return;
+    if (b.id === "onlysel") { dict.onlySel = !dict.onlySel; dict.shown = 20; renderDict(); return; }
+    const items = searchWords(dict.q, dict.level).items, all = { ...selectedMap() };
+    if (b.id === "selall") items.forEach((w) => { all[w.r] = true; });
+    else if (b.id === "selnone") items.forEach((w) => { delete all[w.r]; });
+    saveSelected(all).then(renderDict);
+  };
   [[0, "전체"], [1, "1급"], [2, "2급"], [3, "3급"], [4, "4급"], [5, "5급"]].forEach(([n, label]) => {
     const b = document.createElement("button"); b.className = "chip"; b.type = "button"; b.textContent = label;
     b.setAttribute("aria-pressed", String(dict.level === n));
@@ -149,11 +230,14 @@ function viewDict() {
   renderDict();
 }
 function renderDict() {
+  if (!$("#count")) return; // 검색 지연 타이머가 끝나기 전에 다른 탭으로 이동한 경우
   const r = searchWords(dict.q, dict.level);
   const q = dict.q.trim();
   $("#count").textContent = q ? "‘" + q + "’ 검색 결과 " + r.items.length.toLocaleString() + "개" : "단어 " + r.items.length.toLocaleString() + "개";
   $("#list").innerHTML = r.items.length ? r.items.slice(0, dict.shown).map((w) => wordCard(w, q, r.kind)).join("")
     : '<div class="empty">검색 결과가 없습니다. 철자를 줄이거나 다른 표기로 입력해 보세요.</div>';
+  $("#selbar").innerHTML = '<button type="button" class="chip" id="onlysel" aria-pressed="' + dict.onlySel + '">★ 복습 대상만 (' + selectedCount() + ')</button>' +
+    (r.items.length ? '<button type="button" class="chip" id="selall">결과 ' + r.items.length.toLocaleString() + '개 모두 선택</button><button type="button" class="chip" id="selnone">결과 모두 해제</button>' : "");
   const more = $("#more"); more.hidden = r.items.length <= dict.shown;
   more.textContent = "더 보기 (" + Math.min(20, r.items.length - dict.shown) + "개)";
 }
@@ -174,12 +258,14 @@ function fromLib(key, ref, type, lib, created) {
     learning_steps: lib.learning_steps, reps: lib.reps, lapses: lib.lapses, state: lib.state,
     last_review: lib.last_review ? lib.last_review.toISOString() : null, created };
 }
+/* 복습 범위: 'selected'면 내가 고른 단어만, 아니면 설정한 급수 전체 */
+const inScope = (ref) => (settings().scope === "selected" ? isSel(ref) : true);
 function counts() {
   const now = Date.now(), s = settings(), today = dayKey(new Date());
   let due = 0, newToday = 0;
   for (const c of mem.cards.values()) {
     if (c.created && dayKey(new Date(c.created)) === today) newToday++;
-    if (new Date(c.due).getTime() <= now) due++;
+    if (new Date(c.due).getTime() <= now && inScope(c.ref)) due++;
   }
   const doneToday = mem.log.filter((l) => dayKey(new Date(l.ts)) === today).length;
   return { due, newAvailable: Math.max(0, s.perDay - newToday), newToday, doneToday };
@@ -187,7 +273,7 @@ function counts() {
 /* 다음 카드: 복습 시각이 지난 카드 → 새 카드(하루 한도 안). 같은 날 이미 푼 단어의 반대 방향은 정답이 노출되므로 미룬다. */
 function pickNext() {
   const now = Date.now(), s = settings(), today = dayKey(new Date());
-  const dueCards = [...mem.cards.values()].filter((c) => new Date(c.due).getTime() <= now && !rev.skipped.has(c.key))
+  const dueCards = [...mem.cards.values()].filter((c) => new Date(c.due).getTime() <= now && !rev.skipped.has(c.key) && inScope(c.ref))
     .sort((a, b) => new Date(a.due) - new Date(b.due));
   if (dueCards.length) { const c = dueCards[0]; return { word: byRef.get(c.ref), type: c.type, isNew: false, card: c }; }
   if (counts().newAvailable <= 0) return null;
@@ -195,7 +281,7 @@ function pickNext() {
     : rev.lastType === "zh_ko" ? ["ko_zh", "zh_ko"] : ["zh_ko", "ko_zh"];
   const todayWord = (ref) => ["zh_ko", "ko_zh"].some((t) => { const c = mem.cards.get(ref + ":" + t); return c && c.last_review && dayKey(new Date(c.last_review)) === today; });
   for (const w of WORDS) {
-    if (!s.levels.includes(w.h)) continue;
+    if (s.scope === "selected" ? !isSel(w.r) : !s.levels.includes(w.h)) continue;
     for (const t of types) {
       const key = w.r + ":" + t;
       if (mem.cards.has(key) || rev.skipped.has(key)) continue;
@@ -220,7 +306,8 @@ function drawReview() {
   $(".counts").innerHTML = "<span>복습할 카드 <b>" + c.due + "</b></span><span>오늘 새 카드 가능 <b>" + c.newAvailable + "</b></span><span>오늘 완료 <b>" + c.doneToday + "</b></span>";
   const a = $("#area");
   if (!rev.cur) {
-    a.innerHTML = '<div class="empty">지금 복습할 카드가 없습니다.<div class="small">오늘 새 카드 한도를 모두 썼거나 복습 시각이 아직 되지 않았습니다. 통계·설정에서 하루 새 카드 수와 학습할 급수를 바꿀 수 있습니다.</div>' +
+    const none = settings().scope === "selected" && selectedCount() === 0;
+    a.innerHTML = none ? '<div class="empty">복습 대상으로 고른 단어가 없습니다.<div class="small">단어장에서 카드의 ☆ 버튼을 눌러 복습할 단어를 고르거나, 통계·설정에서 복습 범위를 바꿔 주세요.</div></div>' : '<div class="empty">지금 복습할 카드가 없습니다.<div class="small">오늘 새 카드 한도를 모두 썼거나 복습 시각이 아직 되지 않았습니다. 통계·설정에서 하루 새 카드 수와 학습할 급수를 바꿀 수 있습니다.</div>' +
       (rev.skipped.size ? '<div class="btns" style="margin-top:12px"><button class="btn sec" id="unskip">건너뛴 카드 다시 보기</button></div>' : "") + "</div>";
     const u = $("#unskip"); if (u) u.onclick = () => { rev.skipped.clear(); nextCard(); };
     return;
@@ -290,19 +377,22 @@ function viewStats() {
     '<h2>최근 14일 복습 수</h2><div class="bars" role="img" aria-label="최근 14일 복습 수">' + days.map((d) => '<div title="' + d + ": " + perDay[d] + '회" style="height:' + Math.max(2, Math.round(100 * perDay[d] / max)) + '%"></div>').join("") + "</div>" +
     '<h2>학습 설정</h2>' +
     '<div class="row"><label for="s-perday">하루 새 카드 수</label><input id="s-perday" type="number" min="0" max="200" value="' + s.perDay + '"></div>' +
+    '<div class="row"><label for="s-scope">복습 범위</label><select id="s-scope"><option value="levels">선택한 급수 전체</option><option value="selected">내가 고른 단어만 (' + selectedCount() + '개)</option></select></div>' +
     '<div class="row"><label for="s-dir">카드 방향</label><select id="s-dir"><option value="alternate">번갈아</option><option value="zh_ko">중국어 → 한국어만</option><option value="ko_zh">한국어 → 중국어만</option></select></div>' +
     '<div class="row"><label for="s-ret">목표 기억률</label><select id="s-ret">' + [0.8, 0.85, 0.9, 0.95].map((r) => '<option value="' + r + '">' + Math.round(r * 100) + "%</option>").join("") + "</select></div>" +
-    '<div class="row"><span>새 카드로 학습할 급수</span><span class="chips" id="s-levels"></span></div>' +
+    '<div class="row"><span>새 카드로 학습할 급수 <span class="small muted">(범위가 ‘급수 전체’일 때)</span></span><span class="chips" id="s-levels"></span></div>' +
     '<div class="msg muted" id="s-msg"></div>' +
     '<h2>백업</h2><p class="small muted">복습 기록은 이 기기에만 저장됩니다. 기기를 바꾸거나 사파리 데이터를 지우기 전에 내보내기로 파일을 보관하세요.</p>' +
     '<div class="btns" style="justify-content:flex-start"><button class="btn sec" id="export">기록 내보내기</button><label class="btn sec" for="import" style="cursor:pointer">기록 가져오기</label><input id="import" type="file" accept="application/json,.json" hidden></div>' +
     '<div class="msg" id="b-msg" role="status"></div>' +
     '<p class="small muted" style="margin-top:22px">단어 데이터: HSK 3.0 1–5급 ' + WORDS.length.toLocaleString() + "개 (ivankra/hsk30, 중국 교육부 2021 문서를 옮긴 자료). 한국어 뜻과 훈음은 직접 제공한 데이터이며 외부 사전과 대조하지 않았습니다. 스케줄러: FSRS (ts-fsrs).</p>";
+  $("#s-scope").value = s.scope; $("#s-levels").style.opacity = s.scope === "selected" ? ".45" : "1";
   $("#s-dir").value = s.direction; $("#s-ret").value = String(s.retention);
   const save = async () => {
     const levels = [...document.querySelectorAll("#s-levels .chip")].filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => Number(b.dataset.l));
     const perDayV = Math.max(0, Math.min(200, parseInt($("#s-perday").value, 10) || 0));
-    await saveSettings({ levels: levels.length ? levels : [1], perDay: perDayV, direction: $("#s-dir").value, retention: Number($("#s-ret").value) });
+    await saveSettings({ levels: levels.length ? levels : [1], perDay: perDayV, direction: $("#s-dir").value, retention: Number($("#s-ret").value), scope: $("#s-scope").value });
+    $("#s-levels").style.opacity = $("#s-scope").value === "selected" ? ".45" : "1";
     $("#s-msg").textContent = "저장했습니다.";
   };
   [1, 2, 3, 4, 5].forEach((n) => {
@@ -311,16 +401,16 @@ function viewStats() {
     b.onclick = () => { b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true")); save(); };
     $("#s-levels").append(b);
   });
-  ["#s-perday", "#s-dir", "#s-ret"].forEach((id) => $(id).addEventListener("change", save));
+  ["#s-perday", "#s-scope", "#s-dir", "#s-ret"].forEach((id) => $(id).addEventListener("change", save));
   $("#export").onclick = exportData;
   $("#import").onchange = importData;
 }
 function exportData() {
-  const data = { app: "hanyu-offline", version: 1, exported_at: new Date().toISOString(), settings: settings(), cards: [...mem.cards.values()], log: mem.log };
+  const data = { app: "hanyu-offline", version: 1, exported_at: new Date().toISOString(), settings: settings(), cards: [...mem.cards.values()], log: mem.log, examples: allExamples(), selected: selectedMap() };
   const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "hanyu-backup-" + dayKey(new Date()) + ".json";
   document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  $("#b-msg").textContent = "백업 파일을 만들었습니다. 파일 앱이나 다운로드 목록에서 확인하세요. (" + mem.cards.size + "개 카드, " + mem.log.length + "건 기록)";
+  $("#b-msg").textContent = "백업 파일을 만들었습니다. 파일 앱이나 다운로드 목록에서 확인하세요. (" + mem.cards.size + "개 카드, " + mem.log.length + "건 기록, 예문 " + Object.values(allExamples()).reduce((n, a) => n + a.length, 0) + "개)";
 }
 async function importData(e) {
   const f = e.target.files[0]; if (!f) return;
@@ -338,7 +428,28 @@ async function importData(e) {
     let logs = 0;
     for (const l of d.log) if (l && l.ts && l.key && !seen.has(l.ts + l.key)) { await saveLog(l); logs++; }
     if (d.settings) await saveSettings({ ...DEFAULTS, ...d.settings });
-    msg.textContent = "가져왔습니다. 새 카드 " + added + "개, 더 최근 기록으로 갱신 " + newer + "개, 복습 기록 " + logs + "건.";
+    if (d.selected && typeof d.selected === "object") {
+      const all = { ...selectedMap() };
+      for (const ref of Object.keys(d.selected)) if (byRef.has(ref)) all[ref] = true;
+      await saveSelected(all);
+    }
+    let exAdded = 0;
+    if (d.examples && typeof d.examples === "object") {
+      const all = { ...allExamples() };
+      for (const [ref, arr] of Object.entries(d.examples)) {
+        if (!byRef.has(ref) || !Array.isArray(arr)) continue;
+        const list = [...(all[ref] || [])];
+        for (const e of arr) {
+          if (!e || typeof e.id !== "string" || typeof e.zh !== "string" || !e.zh.trim()) continue;
+          const i = list.findIndex((x) => x.id === e.id);
+          const item = { id: e.id, zh: e.zh.slice(0, 300), ko: typeof e.ko === "string" ? e.ko.slice(0, 300) : "", updated: typeof e.updated === "string" ? e.updated : "" };
+          if (i < 0) { list.push(item); exAdded++; } else if (item.updated > (list[i].updated || "")) list[i] = item;
+        }
+        if (list.length) all[ref] = list;
+      }
+      await saveExamples(all);
+    }
+    msg.textContent = "가져왔습니다. 새 카드 " + added + "개, 더 최근 기록으로 갱신 " + newer + "개, 복습 기록 " + logs + "건, 새 예문 " + exAdded + "개.";
     setTimeout(() => show("stats"), 1200);
   } catch (err) {
     msg.textContent = "가져오지 못했습니다: " + (err && err.message ? err.message : "파일을 읽을 수 없습니다.");
