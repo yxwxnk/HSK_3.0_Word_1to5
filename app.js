@@ -1,6 +1,6 @@
 "use strict";
 /* 汉语单词本 오프라인판 — 서버 없이 기기 안에서만 동작한다.
-   단어 데이터: data/words.json (HSK 1–5급, 읽기 전용)
+   단어 데이터: data/words.json (HSK 3.0 어휘 대강 1–5급 3,600개, 읽기 전용)
    복습 기록·설정: 이 기기의 IndexedDB. 다른 기기와 동기화되지 않는다. */
 
 /* ---------------------------------------------------------------- 유틸 */
@@ -66,6 +66,42 @@ async function saveLog(l) { mem.log.push(l); if (idb && persistent) try { await 
 async function saveSettings(v) { mem.kv.set("settings", v); if (idb && persistent) try { await tx("kv", "readwrite", (s) => s.put(v, "settings")); } catch { persistent = false; } }
 const settings = () => ({ ...DEFAULTS, ...(mem.kv.get("settings") || {}) });
 
+/* ---- 단어 목록이 2025 대강 기준으로 바뀌면서(데이터 버전 2) 예전 단어 번호(L1-0002 등)가 다른 단어를 가리키게 됐다.
+   기기에 저장된 복습 기록·예문·선택을 (간체, 병음)이 같은 새 단어 번호로 옮기고, 새 목록에 없는 단어의 기록은 지우지 않고 legacy에 보관한다. ---- */
+function remapPayload(p, refmap) {
+  const out = { cards: new Map(), log: p.log || [], examples: {}, selected: {}, legacy: { cards: [], examples: {}, selected: {} } };
+  for (const c of p.cards || []) {
+    const nr = refmap[c.ref];
+    if (!nr) { out.legacy.cards.push(c); continue; }
+    const key = nr + ":" + c.type, have = out.cards.get(key), nc = { ...c, ref: nr, key };
+    if (!have || (nc.last_review || "") > (have.last_review || "")) out.cards.set(key, nc);
+  }
+  for (const [ref, arr] of Object.entries(p.examples || {})) {
+    const nr = refmap[ref];
+    if (!nr) { out.legacy.examples[ref] = arr; continue; }
+    out.examples[nr] = (out.examples[nr] || []).concat(arr);
+  }
+  for (const ref of Object.keys(p.selected || {})) { const nr = refmap[ref]; if (nr) out.selected[nr] = true; else out.legacy.selected[ref] = true; }
+  return out;
+}
+async function putKv(key, val) { mem.kv.set(key, val); if (idb && persistent) try { await tx("kv", "readwrite", (s) => s.put(val, key)); } catch { persistent = false; } }
+async function migrateIfNeeded() {
+  if ((mem.kv.get("dataVersion") || 1) >= 2) return;
+  const had = mem.cards.size || Object.keys(allExamples()).length || selectedCount();
+  if (had) {
+    let refmap = {};
+    try { refmap = await (await fetch("data/refmap.json")).json(); } catch { return; } // 대응표를 못 받으면 다음 실행에서 다시 시도
+    const r = remapPayload({ cards: [...mem.cards.values()], examples: allExamples(), selected: selectedMap() }, refmap);
+    mem.cards.clear(); r.cards.forEach((c, k) => mem.cards.set(k, c));
+    if (idb && persistent) try { await tx("cards", "readwrite", (s) => { s.clear(); r.cards.forEach((c) => s.put(c)); }); } catch { persistent = false; }
+    await putKv("examples", r.examples); await putKv("selected", r.selected);
+    const lg = r.legacy, nLegacy = lg.cards.length + Object.values(lg.examples).reduce((n, a) => n + a.length, 0) + Object.keys(lg.selected).length;
+    if (nLegacy) await putKv("legacy", lg);
+    await putKv("notice", "단어 목록이 2025 대강 기준으로 바뀌어 기존 기록 " + (r.cards.size + Object.keys(r.examples).length + Object.keys(r.selected).length) + "건을 새 목록으로 옮겼습니다." + (nLegacy ? " 새 목록에 없는 단어의 기록 " + nLegacy + "건은 지우지 않고 따로 보관했습니다(백업 파일에 포함)." : ""));
+  }
+  await putKv("dataVersion", 2);
+}
+
 /* 내가 직접 넣은 예문: { 단어ref: [{ id, zh, ko, updated }] } — 설정과 같은 저장소(kv)에 한 덩어리로 저장한다. */
 const allExamples = () => mem.kv.get("examples") || {};
 const examplesOf = (ref) => allExamples()[ref] || [];
@@ -107,15 +143,17 @@ function markPinyin(py, q) {
   const s = map[at], e = map[at + p.length - 1];
   return esc(chars.slice(0, s).join("")) + "<mark>" + esc(chars.slice(s, e + 1).join("")) + "</mark>" + esc(chars.slice(e + 1).join(""));
 }
+/* 동형어 번호(本¹ 本²)는 작은 윗첨자로 */
+const supHtml = (w) => (w.v ? '<sup class="hv">' + esc(w.v) + "</sup>" : "");
 function wordCard(w, q, kind) {
   const on = isSel(w.r);
   return '<article class="card"><div class="head"><span class="hz" lang="zh-Hans">' +
-    (kind === "chinese" ? mark(w.s, normZh(q)) : esc(w.s)) + "</span>" +
+    (kind === "chinese" ? mark(w.s, normZh(q)) : esc(w.s)) + supHtml(w) + "</span>" +
     (w.t ? '<span class="tr" lang="zh-Hant">' + esc(w.t) + "</span>" : "") +
     '<button type="button" class="star" data-ref="' + esc(w.r) + '" aria-pressed="' + on + '" aria-label="복습 대상으로 선택">' + (on ? "★" : "☆") + '<span>' + (on ? "복습 대상" : "복습에 추가") + "</span></button></div>" +
     '<p class="py">' + (kind === "latin" ? markPinyin(w.p, q) : esc(w.p)) + "</p>" +
     '<div class="lab">뜻</div><p class="mean">' + (kind === "korean" ? mark(w.m, q.trim()) : esc(w.m)) + "</p>" +
-    '<div class="tags">' + (w.pos ? '<span class="tag">' + esc(w.pos) + "</span>" : "") + '<span class="tag hsk">HSK ' + w.h + "</span></div>" +
+    '<div class="tags">' + (w.pos ? '<span class="tag">' + esc(w.pos) + "</span>" : "") + '<span class="tag hsk">HSK ' + w.h + "</span>" + (w.h2 ? '<span class="tag" title="일부 의미·용법이 이 급수에서 추가됩니다">' + esc(w.h2.replace("-", "–")) + "급 용법 추가</span>" : "") + "</div>" +
     examplesHtml(w.r) +
     (w.c.length ? '<div class="lab">글자별 풀이</div><div class="tiles">' + tilesHtml(w) + "</div>" : "") + "</article>";
 }
@@ -182,19 +220,20 @@ function searchWords(raw, level) {
   const kind = queryKind(q); let test, rank;
   if (kind === "chinese") {
     const z = normZh(q);
-    test = (w) => w.s.includes(z) || w.t.includes(z);
-    rank = (w) => (w.s === z || w.t === z ? 0 : w.s.startsWith(z) || w.t.startsWith(z) ? 1 : 2);
+    const ks = (w) => w.k.concat(w.kt);
+    test = (w) => ks(w).some((x) => x.includes(z));
+    rank = (w) => { const a = ks(w); return a.some((x) => x === z) ? 0 : a.some((x) => x.startsWith(z)) ? 1 : 2; };
   } else if (kind === "korean") {
     const z = normKo(q);
     test = (w) => w.mn.includes(z);
     rank = (w) => (w.mn === z ? 0 : w.mn.startsWith(z) ? 1 : 2);
   } else {
     const p = normPy(q), z = normKo(q);
-    test = (w) => (p && w.pn.includes(p)) || w.mn.includes(z);
-    rank = (w) => (w.pn === p ? 0 : w.pn.startsWith(p) ? 1 : 2);
+    test = (w) => (p && w.pn.some((x) => x.includes(p))) || w.mn.includes(z);
+    rank = (w) => (w.pn.some((x) => x === p) ? 0 : w.pn.some((x) => x.startsWith(p)) ? 1 : 2);
   }
   const items = pool.filter(test).map((w) => [rank(w), w])
-    .sort((a, b) => a[0] - b[0] || a[1].s.length - b[1].s.length || a[1].h - b[1].h || a[1].pn.localeCompare(b[1].pn) || a[1].r.localeCompare(b[1].r))
+    .sort((a, b) => a[0] - b[0] || a[1].s.length - b[1].s.length || a[1].h - b[1].h || a[1].pn[0].localeCompare(b[1].pn[0]) || a[1].r.localeCompare(b[1].r))
     .map((x) => x[1]);
   return { items, kind };
 }
@@ -314,7 +353,7 @@ function drawReview() {
   }
   const { word: w, type, isNew } = rev.cur, zk = type === "zh_ko";
   let h = '<div class="rv"><div class="q">' + (zk ? "이 단어의 한국어 뜻은?" : "이 뜻에 해당하는 중국어는?") + (isNew ? " · 새 카드" : "") + "</div>" +
-    '<div class="prompt' + (zk ? "" : " ko") + '" lang="' + (zk ? "zh-Hans" : "ko") + '">' + esc(zk ? w.s : w.m) + "</div>";
+    '<div class="prompt' + (zk ? "" : " ko") + '" lang="' + (zk ? "zh-Hans" : "ko") + '">' + (zk ? esc(w.s) + supHtml(w) : esc(w.m)) + "</div>";
   if (rev.phase === "prompt") {
     h += '<div class="btns"><button class="btn" id="reveal">정답 보기</button><button class="btn sec" id="skip">건너뛰기</button></div>';
   } else {
@@ -371,6 +410,7 @@ function viewStats() {
   const again = mem.log.filter((l) => l.rating === 1).length;
   const acc = mem.log.length ? Math.round(100 * (1 - again / mem.log.length)) : null;
   v.innerHTML = "<h1>통계·설정</h1>" +
+    (mem.kv.get("notice") ? '<div class="warn" id="notice">' + esc(mem.kv.get("notice")) + ' <button type="button" class="lk" id="notice-ok">확인</button></div>' : "") +
     (persistent ? "" : '<div class="warn">이 브라우저에서는 기록을 저장할 수 없어 앱을 닫으면 사라집니다. 사파리에서 열었다면 홈 화면에 추가한 앱으로 실행해 보세요.</div>') +
     '<div class="stats"><div class="stat"><b>' + c.doneToday + '</b>오늘 복습</div><div class="stat"><b>' + total + '</b>시작한 카드</div>' +
     '<div class="stat"><b>' + learned + '</b>장기 기억 단계</div><div class="stat"><b>' + (acc === null ? "—" : acc + "%") + '</b>다시 아님 비율</div></div>' +
@@ -385,7 +425,7 @@ function viewStats() {
     '<h2>백업</h2><p class="small muted">복습 기록은 이 기기에만 저장됩니다. 기기를 바꾸거나 사파리 데이터를 지우기 전에 내보내기로 파일을 보관하세요.</p>' +
     '<div class="btns" style="justify-content:flex-start"><button class="btn sec" id="export">기록 내보내기</button><label class="btn sec" for="import" style="cursor:pointer">기록 가져오기</label><input id="import" type="file" accept="application/json,.json" hidden></div>' +
     '<div class="msg" id="b-msg" role="status"></div>' +
-    '<p class="small muted" style="margin-top:22px">단어 데이터: HSK 3.0 1–5급 ' + WORDS.length.toLocaleString() + "개 (ivankra/hsk30, 중국 교육부 2021 문서를 옮긴 자료). 한국어 뜻과 훈음은 직접 제공한 데이터이며 외부 사전과 대조하지 않았습니다. 스케줄러: FSRS (ts-fsrs).</p>";
+    '<p class="small muted" style="margin-top:22px">단어 데이터: HSK 3.0 1–5급 ' + WORDS.length.toLocaleString() + "개 (HSK 考试大纲, 中外语言交流合作中心 2025-11 발표 · 2026-07 시행). 한국어 뜻·한자음·훈음은 직접 제공한 엑셀 데이터이며 외부 사전·원문과 대조하지 않았습니다. 스케줄러: FSRS (ts-fsrs).</p>";
   $("#s-scope").value = s.scope; $("#s-levels").style.opacity = s.scope === "selected" ? ".45" : "1";
   $("#s-dir").value = s.direction; $("#s-ret").value = String(s.retention);
   const save = async () => {
@@ -403,10 +443,11 @@ function viewStats() {
   });
   ["#s-perday", "#s-scope", "#s-dir", "#s-ret"].forEach((id) => $(id).addEventListener("change", save));
   $("#export").onclick = exportData;
+  const nok = $("#notice-ok"); if (nok) nok.onclick = async () => { await putKv("notice", ""); $("#notice").remove(); };
   $("#import").onchange = importData;
 }
 function exportData() {
-  const data = { app: "hanyu-offline", version: 1, exported_at: new Date().toISOString(), settings: settings(), cards: [...mem.cards.values()], log: mem.log, examples: allExamples(), selected: selectedMap() };
+  const data = { app: "hanyu-offline", version: 2, dataVersion: 2, legacy: mem.kv.get("legacy") || null, exported_at: new Date().toISOString(), settings: settings(), cards: [...mem.cards.values()], log: mem.log, examples: allExamples(), selected: selectedMap() };
   const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "hanyu-backup-" + dayKey(new Date()) + ".json";
   document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
@@ -416,8 +457,17 @@ async function importData(e) {
   const f = e.target.files[0]; if (!f) return;
   const msg = $("#b-msg");
   try {
-    const d = JSON.parse(await f.text());
+    let d = JSON.parse(await f.text());
     if (d.app !== "hanyu-offline" || !Array.isArray(d.cards) || !Array.isArray(d.log)) throw new Error("이 앱의 백업 파일이 아닙니다.");
+    if (!d.dataVersion || d.dataVersion < 2) { // 예전 단어 목록 기준 백업 → 새 단어 번호로 변환
+      const refmap = await (await fetch("data/refmap.json")).json();
+      const r = remapPayload(d, refmap);
+      d = { ...d, cards: [...r.cards.values()], examples: r.examples, selected: r.selected, dataVersion: 2 };
+      if (Object.keys(r.legacy.cards).length || Object.keys(r.legacy.examples).length || Object.keys(r.legacy.selected).length) {
+        const lg = mem.kv.get("legacy") || { cards: [], examples: {}, selected: {} };
+        await putKv("legacy", { cards: lg.cards.concat(r.legacy.cards), examples: { ...lg.examples, ...r.legacy.examples }, selected: { ...lg.selected, ...r.legacy.selected } });
+      }
+    }
     const known = d.cards.filter((c) => c && typeof c.key === "string" && byRef.has(c.ref) && typeof c.due === "string");
     let added = 0, newer = 0;
     for (const c of known) {
@@ -478,6 +528,7 @@ document.querySelectorAll("nav button").forEach((b) => (b.onclick = () => show(b
   }
   WORDS.forEach((w) => byRef.set(w.r, w));
   await loadAll();
+  await migrateIfNeeded();
   let tab = "dict"; try { tab = localStorage.getItem("hanyu-tab") || "dict"; } catch { /* 무시 */ }
   show(["dict", "review", "stats"].includes(tab) ? tab : "dict");
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
