@@ -1,9 +1,9 @@
 // 오프라인 캐시. 파일을 바꿔 다시 올릴 때는 VERSION 숫자를 올려야 기기가 새 파일을 받는다.
-const VERSION = "v7";
+const VERSION = "v8";
 const CACHE = "hanyu-" + VERSION;
 const FILES = [
   "./", "index.html", "app.js", "manifest.webmanifest",
-  "vendor/ts-fsrs.umd.js", "data/words.json", "data/refmap.json", "data/legacy-words.json",
+  "data/words.json", "data/refmap.json", "data/legacy-words.json",
   "icon-192.png", "icon-512.png", "apple-touch-icon.png",
 ];
 

@@ -105,7 +105,9 @@ mark{background:var(--hl);color:inherit;border-radius:3px;padding:0 1px}
 .rate{font-weight:600;min-height:54px;border-radius:10px;border:1.5px solid var(--line);background:var(--panel);cursor:pointer}
 .rate small{display:block;color:var(--muted);font-weight:400;font-size:11.5px}
 .rate.r1{border-color:var(--pinyin);color:var(--pinyin)} .rate.r2{border-color:var(--warn);color:var(--warn)}
-.rate.r3,.rate.r4{border-color:var(--accent);color:var(--accent)}
+.rate.r3{border-color:var(--accent);color:var(--accent)}
+.rate.r4{border-color:var(--accent);background:var(--accent);color:var(--accent-fg)}
+.rate.r4 small{color:var(--accent-fg);opacity:.85}
 /* 설정·통계 */
 .row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:9px 0;border-bottom:1px solid var(--line)}
 .row label{flex:1 1 150px}
@@ -126,7 +128,6 @@ mark{background:var(--hl);color:inherit;border-radius:3px;padding:0 1px}
   <button data-tab="review"><b>习</b>복습</button>
   <button data-tab="stats"><b>统</b>통계·설정</button>
 </nav>
-<script src="vendor/ts-fsrs.umd.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

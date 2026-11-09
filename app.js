@@ -16,7 +16,7 @@ const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/, HANGUL = /[\u1100-\u11f
 const queryKind = (q) => (CJK.test(q) ? "chinese" : HANGUL.test(q) ? "korean" : "latin");
 
 /* ---------------------------------------------------------------- 저장소 (IndexedDB, 실패하면 메모리) */
-const DEFAULTS = { levels: [1], perDay: 20, direction: "alternate", retention: 0.9, scope: "levels" }; // scope: levels=선택한 급수 전체, selected=내가 고른 단어만
+const DEFAULTS = { levels: [1], perDay: 20, direction: "alternate", scope: "levels" }; // scope: levels=선택한 급수 전체, selected=내가 고른 단어만
 let idb = null, persistent = true;
 const mem = { cards: new Map(), log: [], kv: new Map() };
 
@@ -61,6 +61,14 @@ async function loadAll() {
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch { /* 무시 */ }
 }
 async function saveCard(c) { mem.cards.set(c.key, c); if (idb && persistent) try { await tx("cards", "readwrite", (s) => s.put(c)); } catch { persistent = false; } }
+async function deleteCard(key) { mem.cards.delete(key); if (idb && persistent) try { await tx("cards", "readwrite", (s) => s.delete(key)); } catch { persistent = false; } }
+async function removeLog(ts) {
+  const i = mem.log.map((l) => l.ts).lastIndexOf(ts); if (i >= 0) mem.log.splice(i, 1);
+  if (!idb || !persistent) return;
+  try { await new Promise((res, rej) => { const t = idb.transaction("log", "readwrite"), c = t.objectStore("log").openCursor(null, "prev");
+    c.onsuccess = () => { const cur = c.result; if (!cur) return; if (cur.value.ts === ts) cur.delete(); else cur.continue(); };
+    t.oncomplete = res; t.onerror = t.onabort = () => rej(t.error); }); } catch { persistent = false; }
+}
 async function saveLog(l) { mem.log.push(l); if (idb && persistent) try { await tx("log", "readwrite", (s) => s.add(l)); } catch { persistent = false; } }
 async function saveSettings(v) { mem.kv.set("settings", v); if (idb && persistent) try { await tx("kv", "readwrite", (s) => s.put(v, "settings")); } catch { persistent = false; } }
 const settings = () => ({ ...DEFAULTS, ...(mem.kv.get("settings") || {}) });
@@ -155,7 +163,7 @@ function wordCard(w, q, kind) {
     '<button type="button" class="star" data-ref="' + esc(w.r) + '" aria-pressed="' + on + '" aria-label="복습 대상으로 선택">' + (on ? "★" : "☆") + '<span>' + (on ? "복습 대상" : "복습에 추가") + "</span></button></div>" +
     '<p class="py">' + (kind === "latin" ? markPinyin(w.p, q) : esc(w.p)) + "</p>" +
     '<div class="lab">뜻</div><p class="mean">' + (kind === "korean" ? mark(w.m, q.trim()) : esc(w.m)) + "</p>" +
-    '<div class="tags">' + (w.pos ? '<span class="tag">' + esc(w.pos) + "</span>" : "") + '<span class="tag hsk">HSK ' + w.h + "</span>" + (w.h2 ? '<span class="tag" title="일부 의미·용법이 이 급수에서 추가됩니다">' + esc(w.h2.replace("-", "–")) + "급 용법 추가</span>" : "") + "</div>" +
+    '<div class="tags">' + (w.pos ? '<span class="tag">' + esc(w.pos) + "</span>" : "") + '<span class="tag hsk">HSK ' + w.h + "</span>" + (isMastered(w.r) ? '<span class="tag">완벽히 외움</span>' : "") + (w.h2 ? '<span class="tag" title="일부 의미·용법이 이 급수에서 추가됩니다">' + esc(w.h2.replace("-", "–")) + "급 용법 추가</span>" : "") + "</div>" +
     examplesHtml(w.r) +
     (w.c.length ? '<div class="lab">글자별 풀이</div><div class="tiles">' + tilesHtml(w) + "</div>" : "") + "</article>";
 }
@@ -283,22 +291,18 @@ function renderDict() {
   more.textContent = "더 보기 (" + Math.min(20, r.items.length - dict.shown) + "개)";
 }
 
-/* ---------------------------------------------------------------- 복습 (FSRS) */
+/* ---------------------------------------------------------------- 복습 (고정 간격) */
 const rev = { phase: "prompt", cur: null, skipped: new Set(), lastType: null };
-const fsrsCache = {};
-function scheduler() {
-  const r = settings().retention;
-  return fsrsCache[r] || (fsrsCache[r] = FSRS.fsrs(FSRS.generatorParameters({ request_retention: r, enable_fuzz: false })));
-}
-function toLib(c) {
-  return { due: new Date(c.due), stability: c.stability, difficulty: c.difficulty, elapsed_days: 0, scheduled_days: c.scheduled_days,
-    learning_steps: c.learning_steps, reps: c.reps, lapses: c.lapses, state: c.state, last_review: c.last_review ? new Date(c.last_review) : undefined };
-}
-function fromLib(key, ref, type, lib, created) {
-  return { key, ref, type, due: lib.due.toISOString(), stability: lib.stability, difficulty: lib.difficulty, scheduled_days: lib.scheduled_days,
-    learning_steps: lib.learning_steps, reps: lib.reps, lapses: lib.lapses, state: lib.state,
-    last_review: lib.last_review ? lib.last_review.toISOString() : null, created };
-}
+/* 평가 4가지. 간격은 '오늘 0시 + N일'로 정해, 그날 앱을 처음 여는 시각부터 다시 나온다.
+   (어려움 1일 → 내일부터, 중간 3일 → 3일 뒤부터, 쉬움 14일 → 14일 뒤부터, 완벽히 외움 → 복습에서 제외) */
+const RATINGS = [
+  { n: 1, label: "어려움", sub: "1일 이내 다시", days: 1 },
+  { n: 2, label: "중간", sub: "3일 이내 다시", days: 3 },
+  { n: 3, label: "쉬움", sub: "14일 이내 다시", days: 14 },
+  { n: 4, label: "완벽히 외움", sub: "복습에서 제외", days: null },
+];
+function dueAfter(days) { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + days); return d.toISOString(); }
+const isMastered = (ref) => ["zh_ko", "ko_zh"].some((t) => { const c = mem.cards.get(ref + ":" + t); return c && c.done; });
 /* 복습 범위: 'selected'면 내가 고른 단어만, 아니면 설정한 급수 전체 */
 const inScope = (ref) => (settings().scope === "selected" ? isSel(ref) : true);
 function counts() {
@@ -306,7 +310,7 @@ function counts() {
   let due = 0, newToday = 0;
   for (const c of mem.cards.values()) {
     if (c.created && dayKey(new Date(c.created)) === today) newToday++;
-    if (new Date(c.due).getTime() <= now && inScope(c.ref)) due++;
+    if (!c.done && new Date(c.due).getTime() <= now && inScope(c.ref)) due++;
   }
   const doneToday = mem.log.filter((l) => dayKey(new Date(l.ts)) === today).length;
   return { due, newAvailable: Math.max(0, s.perDay - newToday), newToday, doneToday };
@@ -314,7 +318,7 @@ function counts() {
 /* 다음 카드: 복습 시각이 지난 카드 → 새 카드(하루 한도 안). 같은 날 이미 푼 단어의 반대 방향은 정답이 노출되므로 미룬다. */
 function pickNext() {
   const now = Date.now(), s = settings(), today = dayKey(new Date());
-  const dueCards = [...mem.cards.values()].filter((c) => new Date(c.due).getTime() <= now && !rev.skipped.has(c.key) && inScope(c.ref))
+  const dueCards = [...mem.cards.values()].filter((c) => !c.done && new Date(c.due).getTime() <= now && !rev.skipped.has(c.key) && inScope(c.ref))
     .sort((a, b) => new Date(a.due) - new Date(b.due));
   if (dueCards.length) { const c = dueCards[0]; return { word: byRef.get(c.ref), type: c.type, isNew: false, card: c }; }
   if (counts().newAvailable <= 0) return null;
@@ -342,6 +346,7 @@ function nextCard() {
   if (rev.cur) rev.lastType = rev.cur.type;
   drawReview();
 }
+const undoHtml = () => (rev.undo ? '<div class="btns" style="margin-top:10px"><button type="button" class="lk" id="undo">↶ 방금 평가 되돌리기 (' + esc(rev.undo.word.s) + " · " + esc(rev.undo.label) + ")</button></div>" : "");
 function drawReview() {
   const c = counts();
   $(".counts").innerHTML = "<span>복습할 카드 <b>" + c.due + "</b></span><span>오늘 새 카드 가능 <b>" + c.newAvailable + "</b></span><span>오늘 완료 <b>" + c.doneToday + "</b></span>";
@@ -350,6 +355,7 @@ function drawReview() {
     const none = settings().scope === "selected" && selectedCount() === 0;
     a.innerHTML = none ? '<div class="empty">복습 대상으로 고른 단어가 없습니다.<div class="small">단어장에서 카드의 ☆ 버튼을 눌러 복습할 단어를 고르거나, 통계·설정에서 복습 범위를 바꿔 주세요.</div></div>' : '<div class="empty">지금 복습할 카드가 없습니다.<div class="small">오늘 새 카드 한도를 모두 썼거나 복습 시각이 아직 되지 않았습니다. 통계·설정에서 하루 새 카드 수와 학습할 급수를 바꿀 수 있습니다.</div>' +
       (rev.skipped.size ? '<div class="btns" style="margin-top:12px"><button class="btn sec" id="unskip">건너뛴 카드 다시 보기</button></div>' : "") + "</div>";
+    a.innerHTML += undoHtml(); const un = $("#undo"); if (un) un.onclick = undoLast;
     const u = $("#unskip"); if (u) u.onclick = () => { rev.skipped.clear(); nextCard(); };
     return;
   }
@@ -360,38 +366,36 @@ function drawReview() {
     h += '<div class="btns"><button class="btn" id="reveal">정답 보기</button><button class="btn sec" id="skip">건너뛰기</button></div>';
   } else {
     h += wordCard(w, "", null) + '<div class="ratings" role="group" aria-label="얼마나 잘 기억했나요?">' +
-      [[1, "다시"], [2, "어려움"], [3, "알맞음"], [4, "쉬움"]].map(([n, l]) => '<button class="rate r' + n + '" data-r="' + n + '">' + l + "<small>" + nextLabel(n) + "</small></button>").join("") +
+      RATINGS.map((r) => '<button class="rate r' + r.n + '" data-r="' + r.n + '">' + r.label + "<small>" + r.sub + "</small></button>").join("") +
       '</div><div class="btns" style="margin-top:12px"><button class="btn sec sm" id="skip">평가하지 않고 건너뛰기</button></div>';
   }
-  a.innerHTML = h + "</div>";
+  a.innerHTML = h + "</div>" + undoHtml();
+  const un = $("#undo"); if (un) un.onclick = undoLast;
   const r = $("#reveal"); if (r) r.onclick = () => { rev.phase = "revealed"; drawReview(); };
   const sk = $("#skip"); if (sk) sk.onclick = () => { rev.skipped.add(w.r + ":" + type); nextCard(); };
   a.querySelectorAll(".rate").forEach((b) => (b.onclick = () => rate(Number(b.dataset.r))));
-}
-function previewCard() {
-  const { word, type, card } = rev.cur, now = new Date();
-  return toLib(card || { ...fromLib(word.r + ":" + type, word.r, type, FSRS.createEmptyCard(now), now.toISOString()) });
-}
-function nextLabel(n) {
-  try {
-    const rec = scheduler().next(previewCard(), new Date(), n).card;
-    const mins = (rec.due - new Date()) / 60000;
-    return mins < 60 ? Math.max(1, Math.round(mins)) + "분 뒤" : mins < 1440 ? Math.round(mins / 60) + "시간 뒤" : Math.round(mins / 1440) + "일 뒤";
-  } catch { return ""; }
 }
 let rating = false;
 async function rate(n) {
   if (rating || !rev.cur || rev.phase !== "revealed") return;
   rating = true;
   try {
-    const { word, type, card } = rev.cur, now = new Date();
-    const key = word.r + ":" + type;
-    const res = scheduler().next(previewCard(), now, n);
-    const saved = fromLib(key, word.r, type, res.card, card ? card.created : now.toISOString());
+    const { word, type, card } = rev.cur, now = new Date(), key = word.r + ":" + type, r = RATINGS[n - 1];
+    const saved = { ...(card || {}), key, ref: word.r, type, created: card ? card.created : now.toISOString(),
+      due: r.days ? dueAfter(r.days) : now.toISOString(), last_review: now.toISOString(), reps: ((card && card.reps) || 0) + 1, done: n === 4, interval_days: r.days || 0 };
     await saveCard(saved);
-    await saveLog({ ts: now.toISOString(), key, rating: n, state_before: card ? card.state : 0 });
+    await saveLog({ ts: now.toISOString(), key, rating: n, sch: 2 });
+    rev.undo = { word, type, prev: card ? { ...card } : null, ts: now.toISOString(), label: r.label };
   } finally { rating = false; }
   nextCard();
+}
+/* 방금 한 평가 되돌리기 (잘못 눌렀을 때, 특히 '완벽히 외움') */
+async function undoLast() {
+  const u = rev.undo; if (!u) return;
+  const key = u.word.r + ":" + u.type;
+  if (u.prev) await saveCard(u.prev); else await deleteCard(key);
+  await removeLog(u.ts);
+  rev.undo = null; rev.cur = { word: u.word, type: u.type, isNew: !u.prev, card: u.prev }; rev.phase = "revealed"; drawReview();
 }
 document.addEventListener("keydown", (e) => {
   if (currentTab !== "review" || !rev.cur) return;
@@ -403,38 +407,41 @@ document.addEventListener("keydown", (e) => {
 /* ---------------------------------------------------------------- 통계·설정 */
 function viewStats() {
   const s = settings(), c = counts(), v = $("#view");
-  const total = mem.cards.size, learned = [...mem.cards.values()].filter((x) => x.state === 2).length;
+  const total = mem.cards.size, mastered = [...mem.cards.values()].filter((x) => x.done).length, learning = total - mastered;
   const days = [];
   for (let i = 13; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); days.push(dayKey(d)); }
   const perDay = Object.fromEntries(days.map((d) => [d, 0]));
   mem.log.forEach((l) => { const k = dayKey(new Date(l.ts)); if (k in perDay) perDay[k]++; });
   const max = Math.max(1, ...Object.values(perDay));
-  const again = mem.log.filter((l) => l.rating === 1).length;
-  const acc = mem.log.length ? Math.round(100 * (1 - again / mem.log.length)) : null;
   v.innerHTML = "<h1>통계·설정</h1>" +
     (mem.kv.get("notice") ? '<div class="warn" id="notice">' + esc(mem.kv.get("notice")) + ' <button type="button" class="lk" id="notice-ok">확인</button></div>' : "") +
     storageHtml() +
     (persistent ? "" : '<div class="warn">이 브라우저에서는 기록을 저장할 수 없어 앱을 닫으면 사라집니다. 사파리에서 열었다면 홈 화면에 추가한 앱으로 실행해 보세요.</div>') +
     '<div class="stats"><div class="stat"><b>' + c.doneToday + '</b>오늘 복습</div><div class="stat"><b>' + total + '</b>시작한 카드</div>' +
-    '<div class="stat"><b>' + learned + '</b>장기 기억 단계</div><div class="stat"><b>' + (acc === null ? "—" : acc + "%") + '</b>다시 아님 비율</div></div>' +
+    '<div class="stat"><b>' + learning + '</b>복습 중인 카드</div><div class="stat"><b>' + mastered + '</b>완벽히 외운 카드</div></div>' +
+    (mastered ? '<div class="row"><span>완벽히 외운 카드 ' + mastered + '개를 복습에 다시 포함</span><button type="button" class="btn sec sm" id="unmaster">되돌리기</button></div>' : "") +
     '<h2>최근 14일 복습 수</h2><div class="bars" role="img" aria-label="최근 14일 복습 수">' + days.map((d) => '<div title="' + d + ": " + perDay[d] + '회" style="height:' + Math.max(2, Math.round(100 * perDay[d] / max)) + '%"></div>').join("") + "</div>" +
     '<h2>학습 설정</h2>' +
     '<div class="row"><label for="s-perday">하루 새 카드 수</label><input id="s-perday" type="number" min="0" max="200" value="' + s.perDay + '"></div>' +
     '<div class="row"><label for="s-scope">복습 범위</label><select id="s-scope"><option value="levels">선택한 급수 전체</option><option value="selected">내가 고른 단어만 (' + selectedCount() + '개)</option></select></div>' +
     '<div class="row"><label for="s-dir">카드 방향</label><select id="s-dir"><option value="alternate">번갈아</option><option value="zh_ko">중국어 → 한국어만</option><option value="ko_zh">한국어 → 중국어만</option></select></div>' +
-    '<div class="row"><label for="s-ret">목표 기억률</label><select id="s-ret">' + [0.8, 0.85, 0.9, 0.95].map((r) => '<option value="' + r + '">' + Math.round(r * 100) + "%</option>").join("") + "</select></div>" +
     '<div class="row"><span>새 카드로 학습할 급수 <span class="small muted">(범위가 ‘급수 전체’일 때)</span></span><span class="chips" id="s-levels"></span></div>' +
     '<div class="msg muted" id="s-msg"></div>' +
     '<h2>백업</h2><p class="small muted">복습 기록은 이 기기에만 저장됩니다. 기기를 바꾸거나 사파리 데이터를 지우기 전에 내보내기로 파일을 보관하세요.</p>' +
     '<div class="btns" style="justify-content:flex-start"><button class="btn sec" id="export">기록 내보내기</button><label class="btn sec" for="import" style="cursor:pointer">기록 가져오기</label><input id="import" type="file" accept="application/json,.json" hidden></div>' +
     '<div class="msg" id="b-msg" role="status"></div>' +
-    '<p class="small muted" style="margin-top:22px">단어 데이터: HSK 3.0 1–5급 ' + WORDS.length.toLocaleString() + "개 (HSK 考试大纲, 中外语言交流合作中心 2025-11 발표 · 2026-07 시행). 한국어 뜻·한자음·훈음은 직접 제공한 엑셀 데이터이며 외부 사전·원문과 대조하지 않았습니다. 스케줄러: FSRS (ts-fsrs).</p>";
+    '<p class="small muted" style="margin-top:22px">단어 데이터: HSK 3.0 1–5급 ' + WORDS.length.toLocaleString() + "개 (HSK 考试大纲, 中外语言交流合作中心 2025-11 발표 · 2026-07 시행). 한국어 뜻·한자음·훈음은 직접 제공한 엑셀 데이터이며 외부 사전·원문과 대조하지 않았습니다. 복습 간격: 어려움 1일 · 중간 3일 · 쉬움 14일 이내에 다시 나오고, 완벽히 외움은 복습에서 제외됩니다.</p>";
   $("#s-scope").value = s.scope; $("#s-levels").style.opacity = s.scope === "selected" ? ".45" : "1";
-  $("#s-dir").value = s.direction; $("#s-ret").value = String(s.retention);
+  $("#s-dir").value = s.direction;
+  const um = $("#unmaster"); if (um) um.onclick = async () => {
+    if (um.dataset.sure !== "1") { um.dataset.sure = "1"; um.textContent = "한 번 더 누르면 되돌립니다"; return; }
+    for (const c of [...mem.cards.values()].filter((x) => x.done)) await saveCard({ ...c, done: false, due: new Date().toISOString() });
+    viewStats();
+  };
   const save = async () => {
     const levels = [...document.querySelectorAll("#s-levels .chip")].filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => Number(b.dataset.l));
     const perDayV = Math.max(0, Math.min(200, parseInt($("#s-perday").value, 10) || 0));
-    await saveSettings({ levels: levels.length ? levels : [1], perDay: perDayV, direction: $("#s-dir").value, retention: Number($("#s-ret").value), scope: $("#s-scope").value });
+    await saveSettings({ levels: levels.length ? levels : [1], perDay: perDayV, direction: $("#s-dir").value, scope: $("#s-scope").value });
     $("#s-levels").style.opacity = $("#s-scope").value === "selected" ? ".45" : "1";
     $("#s-msg").textContent = "저장했습니다.";
   };
@@ -444,7 +451,7 @@ function viewStats() {
     b.onclick = () => { b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true")); save(); };
     $("#s-levels").append(b);
   });
-  ["#s-perday", "#s-scope", "#s-dir", "#s-ret"].forEach((id) => $(id).addEventListener("change", save));
+  ["#s-perday", "#s-scope", "#s-dir"].forEach((id) => $(id).addEventListener("change", save));
   $("#export").onclick = exportData;
   fillStorageExtras();
   const nok = $("#notice-ok"); if (nok) nok.onclick = async () => { await putKv("notice", ""); $("#notice").remove(); };

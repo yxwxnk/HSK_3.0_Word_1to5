@@ -1,12 +1,12 @@
 # 汉语单词本 오프라인판
 
-서버 없이 아이폰 안에서만 도는 정적 웹앱입니다. HSK 1–5급 4,316개 단어 검색과 FSRS 복습이 들어 있습니다.
+서버 없이 아이폰 안에서만 도는 정적 웹앱입니다. HSK 1–5급 3,600개 단어 검색과 간격 복습(어려움 1일·중간 3일·쉬움 14일·완벽히 외움 제외)이 들어 있습니다.
 
 ## GitHub Pages에 올리기 (컴퓨터 브라우저로)
 1. github.com에 로그인하고 오른쪽 위 `+` → **New repository**.
 2. 이름을 `hanyu` 등으로 짓고 **Public**으로 만든 뒤 **Create repository**. (무료 계정의 Pages는 공개 저장소에서만 됩니다. 올라가는 것은 단어 데이터뿐이고 개인 기록은 올라가지 않습니다.)
 3. 저장소 화면의 **uploading an existing file** 링크를 누릅니다.
-4. 이 zip을 풀어서 나온 파일과 폴더 전체(`index.html`, `app.js`, `sw.js`, `manifest.webmanifest`, 아이콘 3개, `vendor/`, `data/`)를 끌어다 놓습니다. 폴더째 올려야 `data/words.json`이 포함됩니다.
+4. 이 zip을 풀어서 나온 파일과 폴더 전체(`index.html`, `app.js`, `sw.js`, `manifest.webmanifest`, 아이콘 3개, `data/`)를 끌어다 놓습니다. 폴더째 올려야 `data/words.json`이 포함됩니다.
 5. **Commit changes**를 누릅니다.
 6. 저장소의 **Settings → Pages**에서 Source를 **Deploy from a branch**, Branch를 `main` / `/ (root)`로 고르고 **Save**.
 7. 1–2분 뒤 같은 화면에 `https://내아이디.github.io/hanyu/` 주소가 표시됩니다.
