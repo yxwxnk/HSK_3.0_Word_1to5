@@ -315,26 +315,38 @@ function counts() {
   const doneToday = mem.log.filter((l) => dayKey(new Date(l.ts)) === today).length;
   return { due, newAvailable: Math.max(0, s.perDay - newToday), newToday, doneToday };
 }
-/* 다음 카드: 복습 시각이 지난 카드 → 새 카드(하루 한도 안). 같은 날 이미 푼 단어의 반대 방향은 정답이 노출되므로 미룬다. */
+/* 다음 카드: 복습할 카드(복습 시각이 지난 것)와 새 카드(하루 한도 안)를 완전히 무작위로 섞어 낸다.
+   복습 카드와 새 카드 중 어느 쪽에서 뽑을지는 남은 장수에 비례해 정하고, 그 안에서는 균등한 무작위로 고른다.
+   단어 순서(번호·병음)나 복습 시각 순서는 쓰지 않는다. 직전 카드가 바로 다시 나오지는 않는다.
+   같은 날 이미 푼 단어의 반대 방향 카드는 정답이 노출되므로 새 카드로 뽑지 않는다. */
+const rand = (arr) => arr[Math.floor(Math.random() * arr.length)];
 function pickNext() {
-  const now = Date.now(), s = settings(), today = dayKey(new Date());
-  const dueCards = [...mem.cards.values()].filter((c) => !c.done && new Date(c.due).getTime() <= now && !rev.skipped.has(c.key) && inScope(c.ref))
-    .sort((a, b) => new Date(a.due) - new Date(b.due));
-  if (dueCards.length) { const c = dueCards[0]; return { word: byRef.get(c.ref), type: c.type, isNew: false, card: c }; }
-  if (counts().newAvailable <= 0) return null;
-  const types = s.direction === "zh_ko" ? ["zh_ko"] : s.direction === "ko_zh" ? ["ko_zh"]
-    : rev.lastType === "zh_ko" ? ["ko_zh", "zh_ko"] : ["zh_ko", "ko_zh"];
-  const todayWord = (ref) => ["zh_ko", "ko_zh"].some((t) => { const c = mem.cards.get(ref + ":" + t); return c && c.last_review && dayKey(new Date(c.last_review)) === today; });
-  for (const w of WORDS) {
-    if (s.scope === "selected" ? !isSel(w.r) : !s.levels.includes(w.h)) continue;
-    for (const t of types) {
-      const key = w.r + ":" + t;
-      if (mem.cards.has(key) || rev.skipped.has(key)) continue;
-      if (todayWord(w.r)) continue;
-      return { word: w, type: t, isNew: true, card: null };
-    }
+  const now = Date.now(), s = settings(), today = dayKey(new Date()), last = rev.lastKey;
+  let dueCards = [...mem.cards.values()].filter((c) => !c.done && new Date(c.due).getTime() <= now && !rev.skipped.has(c.key) && inScope(c.ref) && byRef.has(c.ref));
+  if (dueCards.length > 1) dueCards = dueCards.filter((c) => c.key !== last);
+  let newCands = [];
+  if (counts().newAvailable > 0) {
+    const allowed = s.direction === "zh_ko" ? ["zh_ko"] : s.direction === "ko_zh" ? ["ko_zh"] : ["zh_ko", "ko_zh"];
+    const todayWord = (ref) => ["zh_ko", "ko_zh"].some((t) => { const c = mem.cards.get(ref + ":" + t); return c && c.last_review && dayKey(new Date(c.last_review)) === today; });
+    const collect = (types) => {
+      const out = [];
+      for (const w of WORDS) {
+        if (s.scope === "selected" ? !isSel(w.r) : !s.levels.includes(w.h)) continue;
+        if (todayWord(w.r)) continue;
+        for (const t of types) { const key = w.r + ":" + t; if (!mem.cards.has(key) && !rev.skipped.has(key) && key !== last) out.push({ word: w, type: t, key }); }
+      }
+      return out;
+    };
+    // '번갈아'는 직전과 반대 방향 새 카드를 우선하고, 후보가 없으면 두 방향 모두에서 뽑는다.
+    newCands = s.direction === "alternate" && rev.lastType ? collect([rev.lastType === "zh_ko" ? "ko_zh" : "zh_ko"]) : [];
+    if (!newCands.length) newCands = collect(allowed);
+    const room = counts().newAvailable; // 오늘 더 낼 수 있는 새 카드 수(후보가 더 적으면 후보 수)
+    if (newCands.length && room <= 0) newCands = [];
   }
-  return null;
+  const nNew = Math.min(counts().newAvailable, newCands.length), nDue = dueCards.length;
+  if (!nNew && !nDue) return null;
+  if (nDue && Math.random() < nDue / (nDue + nNew)) { const c = rand(dueCards); return { word: byRef.get(c.ref), type: c.type, isNew: false, card: c }; }
+  const n = rand(newCands); return { word: n.word, type: n.type, isNew: true, card: null };
 }
 function viewReview() {
   const v = $("#view");
@@ -343,7 +355,7 @@ function viewReview() {
 }
 function nextCard() {
   rev.cur = pickNext(); rev.phase = "prompt";
-  if (rev.cur) rev.lastType = rev.cur.type;
+  if (rev.cur) { rev.lastType = rev.cur.type; rev.lastKey = rev.cur.word.r + ":" + rev.cur.type; }
   drawReview();
 }
 const undoHtml = () => (rev.undo ? '<div class="btns" style="margin-top:10px"><button type="button" class="lk" id="undo">↶ 방금 평가 되돌리기 (' + esc(rev.undo.word.s) + " · " + esc(rev.undo.label) + ")</button></div>" : "");
