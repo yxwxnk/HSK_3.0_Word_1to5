@@ -46,18 +46,17 @@ async function loadAll() {
   idb = await openDb();
   if (!idb) { persistent = false; return; }
   try {
-    const [cards, log, settings, examples, selected] = await Promise.all([
+    // kv 저장소의 모든 항목(설정·예문·고른 단어·데이터 버전·보관 기록·안내)을 빠짐없이 읽는다.
+    // (dataVersion을 읽지 않으면 실행할 때마다 '예전 기록 이전'이 다시 돌아 기록이 뒤섞이므로 반드시 포함해야 한다.)
+    const KV_KEYS = ["settings", "examples", "selected", "dataVersion", "legacy", "notice"];
+    const [cards, log, ...kvs] = await Promise.all([
       tx("cards", "readonly", (s) => s.getAll()),
       tx("log", "readonly", (s) => s.getAll()),
-      tx("kv", "readonly", (s) => s.get("settings")),
-      tx("kv", "readonly", (s) => s.get("examples")),
-      tx("kv", "readonly", (s) => s.get("selected")),
+      ...KV_KEYS.map((k) => tx("kv", "readonly", (s) => s.get(k))),
     ]);
     cards.forEach((c) => mem.cards.set(c.key, c));
     mem.log = log;
-    if (settings) mem.kv.set("settings", settings);
-    if (examples) mem.kv.set("examples", examples);
-    if (selected) mem.kv.set("selected", selected);
+    KV_KEYS.forEach((k, i) => { if (kvs[i] !== undefined) mem.kv.set(k, kvs[i]); });
   } catch { persistent = false; }
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch { /* 무시 */ }
 }
@@ -96,7 +95,10 @@ async function migrateIfNeeded() {
     if (idb && persistent) try { await tx("cards", "readwrite", (s) => { s.clear(); r.cards.forEach((c) => s.put(c)); }); } catch { persistent = false; }
     await putKv("examples", r.examples); await putKv("selected", r.selected);
     const lg = r.legacy, nLegacy = lg.cards.length + Object.values(lg.examples).reduce((n, a) => n + a.length, 0) + Object.keys(lg.selected).length;
-    if (nLegacy) await putKv("legacy", lg);
+    if (nLegacy) {
+      const prev = mem.kv.get("legacy") || { cards: [], examples: {}, selected: {} };
+      await putKv("legacy", { cards: prev.cards.concat(lg.cards), examples: { ...prev.examples, ...lg.examples }, selected: { ...prev.selected, ...lg.selected } });
+    }
     await putKv("notice", "단어 목록이 2025 대강 기준으로 바뀌어 기존 기록 " + (r.cards.size + Object.keys(r.examples).length + Object.keys(r.selected).length) + "건을 새 목록으로 옮겼습니다." + (nLegacy ? " 새 목록에 없는 단어의 기록 " + nLegacy + "건은 지우지 않고 따로 보관했습니다(백업 파일에 포함)." : ""));
   }
   await putKv("dataVersion", 2);
@@ -411,6 +413,7 @@ function viewStats() {
   const acc = mem.log.length ? Math.round(100 * (1 - again / mem.log.length)) : null;
   v.innerHTML = "<h1>통계·설정</h1>" +
     (mem.kv.get("notice") ? '<div class="warn" id="notice">' + esc(mem.kv.get("notice")) + ' <button type="button" class="lk" id="notice-ok">확인</button></div>' : "") +
+    storageHtml() +
     (persistent ? "" : '<div class="warn">이 브라우저에서는 기록을 저장할 수 없어 앱을 닫으면 사라집니다. 사파리에서 열었다면 홈 화면에 추가한 앱으로 실행해 보세요.</div>') +
     '<div class="stats"><div class="stat"><b>' + c.doneToday + '</b>오늘 복습</div><div class="stat"><b>' + total + '</b>시작한 카드</div>' +
     '<div class="stat"><b>' + learned + '</b>장기 기억 단계</div><div class="stat"><b>' + (acc === null ? "—" : acc + "%") + '</b>다시 아님 비율</div></div>' +
@@ -443,8 +446,41 @@ function viewStats() {
   });
   ["#s-perday", "#s-scope", "#s-dir", "#s-ret"].forEach((id) => $(id).addEventListener("change", save));
   $("#export").onclick = exportData;
+  fillStorageExtras();
   const nok = $("#notice-ok"); if (nok) nok.onclick = async () => { await putKv("notice", ""); $("#notice").remove(); };
   $("#import").onchange = importData;
+}
+/* 저장 상태: 기록이 어디에 얼마나 저장돼 있는지 화면에서 바로 확인할 수 있게 한다. */
+function storageHtml() {
+  const standalone = (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
+  const exN = Object.values(allExamples()).reduce((n, a) => n + a.length, 0);
+  return '<h2>저장 상태</h2><div class="warn"><b>' + (persistent ? "이 기기에 저장 중" : "저장 불가 (앱을 닫으면 사라짐)") + "</b> · " +
+    (standalone ? "홈 화면 앱으로 실행 중" : "사파리(브라우저) 탭으로 실행 중") + "<br>고른 단어 " + selectedCount() + "개 · 내 예문 " + exN + "개 · 시작한 카드 " + mem.cards.size + "개<br>" +
+    '<span id="persist-state"></span><div class="small muted" style="margin-top:4px">기록은 홈 화면 앱과 사파리 탭에 각각 따로 저장됩니다. 한쪽에서 넣은 것은 다른 쪽에서 보이지 않습니다. 항상 같은 쪽(홈 화면 앱)으로 여세요.</div></div>' +
+    '<div id="legacy"></div>';
+}
+async function fillStorageExtras() {
+  try {
+    if (navigator.storage && navigator.storage.persisted) {
+      const p = await navigator.storage.persisted(), el = $("#persist-state");
+      if (el) el.textContent = p ? "브라우저가 이 저장소를 보존 대상으로 표시했습니다." : "보존 보장 없음: 기기 저장 공간이 부족하면 브라우저가 지울 수 있으니 가끔 기록을 내보내 두세요.";
+    }
+  } catch { /* 무시 */ }
+  const lg = mem.kv.get("legacy"), box = $("#legacy"); if (!lg || !box) return;
+  const exCount = Object.values(lg.examples || {}).reduce((n, a) => n + a.length, 0), selN = Object.keys(lg.selected || {}).length;
+  if (!exCount && !selN && !(lg.cards || []).length) return;
+  let names = {}; try { names = await (await fetch("data/legacy-words.json")).json(); } catch { /* 무시 */ }
+  const label = (ref) => (names[ref] ? names[ref][0] + " (" + names[ref][1] + ") " + names[ref][2] : ref);
+  const lines = [];
+  Object.keys(lg.selected || {}).forEach((r) => lines.push("★ " + label(r)));
+  Object.entries(lg.examples || {}).forEach(([r, arr]) => arr.forEach((e) => lines.push("예문 · " + label(r) + "\n  " + e.zh + (e.ko ? "\n  " + e.ko : ""))));
+  box.innerHTML = '<h2>이전 단어 목록의 기록</h2><p class="small muted">단어 목록이 2025 대강 기준으로 바뀌면서 새 목록에 없는 단어 ' + (lg.cards || []).length + "개 카드의 복습 기록, 고른 단어 " + selN + "개, 예문 " + exCount + '개가 여기에 보관돼 있습니다. 지워지지 않았습니다.</p>' +
+    '<div class="btns" style="justify-content:flex-start"><button type="button" class="btn sec sm" id="legacy-copy">보관된 선택·예문을 텍스트로 복사</button></div><div class="msg" id="legacy-msg"></div>';
+  $("#legacy-copy").onclick = async () => {
+    const text = lines.join("\n");
+    try { await navigator.clipboard.writeText(text); $("#legacy-msg").textContent = "복사했습니다. 메모 앱 등에 붙여 넣어 보관하세요."; }
+    catch { const ta = document.createElement("textarea"); ta.value = text; ta.readOnly = true; ta.rows = 8; ta.style.cssText = "width:100%;margin-top:8px"; box.append(ta); ta.select(); $("#legacy-msg").textContent = "아래 글을 직접 선택해 복사하세요."; }
+  };
 }
 function exportData() {
   const data = { app: "hanyu-offline", version: 2, dataVersion: 2, legacy: mem.kv.get("legacy") || null, exported_at: new Date().toISOString(), settings: settings(), cards: [...mem.cards.values()], log: mem.log, examples: allExamples(), selected: selectedMap() };
