@@ -507,14 +507,13 @@ function viewStats() {
   const max = Math.max(1, ...Object.values(perDay));
   v.innerHTML = "<h1>통계·설정</h1>" +
     (mem.kv.get("notice") ? '<div class="warn" id="notice">' + esc(mem.kv.get("notice")) + ' <button type="button" class="lk" id="notice-ok">확인</button></div>' : "") +
-    storageHtml() +
     (persistent ? "" : '<div class="warn">이 브라우저에서는 기록을 저장할 수 없어 앱을 닫으면 사라집니다. 사파리에서 열었다면 홈 화면에 추가한 앱으로 실행해 보세요.</div>') +
     '<div class="stats"><div class="stat"><b>' + c.doneToday + '</b>오늘 복습</div><div class="stat"><b>' + total + '</b>시작한 카드</div>' +
     '<div class="stat"><b>' + learning + '</b>복습 중인 카드</div><div class="stat"><b>' + mastered + '</b>완벽히 외운 카드</div></div>' +
     (mastered ? '<div class="row"><span>완벽히 외운 카드 ' + mastered + '개를 복습에 다시 포함</span><button type="button" class="btn sec sm" id="unmaster">되돌리기</button></div>' : "") +
     '<h2>최근 14일 복습 수</h2><div class="bars" role="img" aria-label="최근 14일 복습 수">' + days.map((d) => '<div title="' + d + ": " + perDay[d] + '회" style="height:' + Math.max(2, Math.round(100 * perDay[d] / max)) + '%"></div>').join("") + "</div>" +
     '<h2>학습 설정</h2>' +
-    '<div class="row"><label for="s-perday">하루 새 카드 수</label><input id="s-perday" type="number" min="0" max="200" value="' + s.perDay + '"></div>' +
+    '<div class="row"><label for="s-perday">하루 새 카드 수 (Max. 500)</label><input id="s-perday" type="number" min="0" max="500" value="' + s.perDay + '"></div>' +
     '<div class="row"><label for="s-scope">복습 범위</label><select id="s-scope"><option value="levels">선택한 급수 전체</option><option value="selected">내가 고른 단어만 (' + selectedCount() + '개)</option></select></div>' +
     '<div class="row"><label for="s-dir">카드 방향</label><select id="s-dir"><option value="alternate">번갈아 (중→한 / 한→중 CBT)</option><option value="zh_ko">중국어 → 한국어만</option><option value="ko_zh">한국어 → 중국어 (CBT · 문자 입력)</option><option value="ko_zh_pbt">한국어 → 중국어 (PBT · 손글씨)</option></select></div>' +
     '<div class="small muted" id="s-dirnote" style="margin:4px 0 0"></div>' +
@@ -524,8 +523,8 @@ function viewStats() {
     [["어려움", 0], ["중간", 1], ["쉬움", 2]].map(([l, i]) => '<div class="row"><label for="s-iv' + i + '">' + l + '</label><span><input id="s-iv' + i + '" type="number" inputmode="numeric" min="1" max="365" value="' + ivDays()[i] + '"> 일 이내 다시</span></div>').join("") +
     '<h2>백업</h2><p class="small muted">복습 기록은 이 기기에만 저장됩니다. 기기를 바꾸거나 사파리 데이터를 지우기 전에 내보내기로 파일을 보관하세요.</p>' +
     '<div class="btns" style="justify-content:flex-start"><button class="btn sec" id="export">기록 내보내기</button><label class="btn sec" for="import" style="cursor:pointer">기록 가져오기</label><input id="import" type="file" accept="application/json,.json" hidden></div>' +
-    '<div class="msg" id="b-msg" role="status"></div>' +
-    '<p class="small muted" style="margin-top:22px">단어 데이터: HSK 3.0 1–5급 ' + WORDS.length.toLocaleString() + "개 (HSK 考试大纲, 中外语言交流合作中心 2025-11 발표 · 2026-07 시행). 한국어 뜻·한자음·훈음은 직접 제공한 엑셀 데이터이며 외부 사전·원문과 대조하지 않았습니다. 복습 간격: 어려움 1일 · 중간 3일 · 쉬움 14일 이내에 다시 나오고, 완벽히 외움은 복습에서 제외됩니다.</p>";
+    '<div class="msg" id="b-msg" role="status"></div>' + storageHtml() +
+    '<p class="small muted" style="margin-top:22px">단어 데이터: HSK 3.0 1–5급 ' + WORDS.length.toLocaleString() + "개 (HSK 考试大纲, 中外语言交流合作中心 2025-11 발표 · 2026-07 시행). 한국어 뜻·한자음·훈음은 직접 제공한 엑셀 데이터이며 외부 사전·원문과 대조하지 않았습니다. 복습 간격은 위 ‘복습 주기’에서 정한 일수대로 다시 나오고, 완벽히 외움은 복습에서 제외됩니다.</p>";
   $("#s-scope").value = s.scope; $("#s-levels").style.opacity = s.scope === "selected" ? ".45" : "1";
   $("#s-dir").value = s.direction;
   const DIRNOTE = { alternate: "카드마다 중국어→한국어와 한국어→중국어(CBT, 타자 입력)가 번갈아 나옵니다.", zh_ko: "한자를 보고 뜻을 떠올린 뒤 정답을 확인합니다.", ko_zh: "뜻을 보고 중국어를 타자로 입력합니다. 맞았는지 바로 표시됩니다.", ko_zh_pbt: "뜻을 보고 손글씨로 쓴 뒤 정답과 비교해 직접 평가합니다." };
@@ -537,10 +536,11 @@ function viewStats() {
   };
   const save = async () => {
     const levels = [...document.querySelectorAll("#s-levels .chip")].filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => Number(b.dataset.l));
-    const perDayV = Math.max(0, Math.min(200, parseInt($("#s-perday").value, 10) || 0));
+    const perDayV = Math.max(0, Math.min(500, parseInt($("#s-perday").value, 10) || 0));
     await saveSettings({ ...settings(), levels: levels.length ? levels : [1], perDay: perDayV, direction: $("#s-dir").value, scope: $("#s-scope").value, iv: [0, 1, 2].map((i) => Math.max(1, Math.min(365, Math.round(Number($("#s-iv" + i).value)) || IV_BASE[i]))) });
     [0, 1, 2].forEach((i) => { $("#s-iv" + i).value = ivDays()[i]; });
     $("#s-levels").style.opacity = $("#s-scope").value === "selected" ? ".45" : "1";
+    $("#s-perday").value = perDayV;
     $("#s-msg").textContent = "저장했습니다.";
   };
   [1, 2, 3, 4, 5].forEach((n) => {
