@@ -240,11 +240,12 @@ document.addEventListener("submit", (ev) => {
 });
 
 /* ---------------------------------------------------------------- 단어장 */
-const dict = { q: "", level: 0, shown: 20, onlySel: false };
+const dict = { q: "", level: 0, shown: 20, onlySel: false, onlyEx: false };
 function searchWords(raw, level) {
   const q = raw.trim();
   let pool = level ? WORDS.filter((w) => w.h === level) : WORDS;
   if (dict.onlySel) pool = pool.filter((w) => isSel(w.r));
+  if (dict.onlyEx) pool = pool.filter((w) => examplesOf(w.r).length > 0);
   if (!q) return { items: pool, kind: null };
   const kind = queryKind(q); let test, rank;
   if (kind === "chinese") {
@@ -276,10 +277,12 @@ function viewDict() {
   $("#selbar").onclick = (ev) => {
     const b = ev.target.closest("button"); if (!b) return;
     if (b.id === "onlysel") { dict.onlySel = !dict.onlySel; dict.shown = 20; renderDict(); return; }
-    const items = searchWords(dict.q, dict.level).items, all = { ...selectedMap() };
-    if (b.id === "selall") items.forEach((w) => { all[w.r] = true; });
-    else if (b.id === "selnone") items.forEach((w) => { delete all[w.r]; });
-    saveSelected(all).then(renderDict);
+    if (b.id === "onlyex") { dict.onlyEx = !dict.onlyEx; dict.shown = 20; renderDict(); return; }
+    if (b.id === "reset") { // 검색 초기화: 검색어·급수·필터만 되돌리고 ★ 선택은 그대로 둔다
+      dict.q = ""; dict.level = 0; dict.onlySel = false; dict.onlyEx = false; dict.shown = 20;
+      $("#q").value = ""; $("#qclear").hidden = true; [...lv.children].forEach((c, i) => c.setAttribute("aria-pressed", String(i === 0)));
+      renderDict(); window.scrollTo(0, 0);
+    }
   };
   [[0, "전체"], [1, "1급"], [2, "2급"], [3, "3급"], [4, "4급"], [5, "5급"]].forEach(([n, label]) => {
     const b = document.createElement("button"); b.className = "chip"; b.type = "button"; b.textContent = label;
@@ -305,7 +308,8 @@ function renderDict() {
   $("#list").innerHTML = r.items.length ? r.items.slice(0, dict.shown).map((w) => wordCard(w, q, r.kind)).join("")
     : '<div class="empty">검색 결과가 없습니다. 철자를 줄이거나 다른 표기로 입력해 보세요.</div>';
   $("#selbar").innerHTML = '<button type="button" class="chip" id="onlysel" aria-pressed="' + dict.onlySel + '">★ 복습 대상만 (' + selectedCount() + ')</button>' +
-    (r.items.length ? '<button type="button" class="chip" id="selall">결과 ' + r.items.length.toLocaleString() + '개 모두 선택</button><button type="button" class="chip" id="selnone">결과 모두 해제</button>' : "");
+    '<button type="button" class="chip" id="onlyex" aria-pressed="' + dict.onlyEx + '">예문 있는 단어만</button>' +
+    '<button type="button" class="chip" id="reset">검색 초기화</button>';
   const more = $("#more"); more.hidden = r.items.length <= dict.shown;
   more.textContent = "더 보기 (" + Math.min(20, r.items.length - dict.shown) + "개)";
 }
