@@ -507,12 +507,6 @@ function viewStats() {
     '<div class="stat"><b>' + learning + '</b>복습 중인 카드</div><div class="stat"><b>' + mastered + '</b>완벽히 외운 카드</div></div>' +
     (mastered ? '<div class="row"><span>완벽히 외운 카드 ' + mastered + '개를 복습에 다시 포함</span><button type="button" class="btn sec sm" id="unmaster">되돌리기</button></div>' : "") +
     '<h2>최근 14일 복습 수</h2><div class="bars" role="img" aria-label="최근 14일 복습 수">' + days.map((d) => '<div title="' + d + ": " + perDay[d] + '회" style="height:' + Math.max(2, Math.round(100 * perDay[d] / max)) + '%"></div>').join("") + "</div>" +
-    '<h2>화면 설정</h2>' +
-    '<div class="row"><label for="s-hanzi">한자 글꼴</label><select id="s-hanzi">' + Object.entries(HANZI_FONTS).map(([k, v]) => '<option value="' + k + '">' + v[0] + "</option>").join("") + "</select></div>" +
-    '<div class="row"><label for="s-body">한글·본문 글꼴</label><select id="s-body">' + Object.entries(BODY_FONTS).map(([k, v]) => '<option value="' + k + '">' + v[0] + "</option>").join("") + "</select></div>" +
-    '<div class="row"><label for="s-size">글자 크기</label><select id="s-size">' + Object.entries(SIZES).map(([k, v]) => '<option value="' + k + '">' + v[0] + "</option>").join("") + "</select></div>" +
-    '<div class="card" style="margin-top:10px"><div class="head"><span class="hz" lang="zh-Hans">爱好</span><span class="tr" lang="zh-Hant">愛好</span></div><p class="py">àihào</p><p class="mean">좋아하다, 취미 · 글꼴 미리보기</p></div>' +
-    '<div class="small muted">글꼴은 이 기기에 들어 있는 것만 쓸 수 있어서, 기기에 없는 글꼴을 고르면 비슷한 다른 글꼴로 보일 수 있습니다. 위 미리보기로 확인하세요.</div>' +
     '<h2>학습 설정</h2>' +
     '<div class="row"><label for="s-perday">하루 새 카드 수</label><input id="s-perday" type="number" min="0" max="200" value="' + s.perDay + '"></div>' +
     '<div class="row"><label for="s-scope">복습 범위</label><select id="s-scope"><option value="levels">선택한 급수 전체</option><option value="selected">내가 고른 단어만 (' + selectedCount() + '개)</option></select></div>' +
@@ -526,11 +520,6 @@ function viewStats() {
     '<div class="btns" style="justify-content:flex-start"><button class="btn sec" id="export">기록 내보내기</button><label class="btn sec" for="import" style="cursor:pointer">기록 가져오기</label><input id="import" type="file" accept="application/json,.json" hidden></div>' +
     '<div class="msg" id="b-msg" role="status"></div>' +
     '<p class="small muted" style="margin-top:22px">단어 데이터: HSK 3.0 1–5급 ' + WORDS.length.toLocaleString() + "개 (HSK 考试大纲, 中外语言交流合作中心 2025-11 발표 · 2026-07 시행). 한국어 뜻·한자음·훈음은 직접 제공한 엑셀 데이터이며 외부 사전·원문과 대조하지 않았습니다. 복습 간격: 어려움 1일 · 중간 3일 · 쉬움 14일 이내에 다시 나오고, 완벽히 외움은 복습에서 제외됩니다.</p>";
-  $("#s-hanzi").value = s.hanziFont; $("#s-body").value = s.bodyFont; $("#s-size").value = s.size;
-  ["#s-hanzi", "#s-body", "#s-size"].forEach((id) => $(id).addEventListener("change", async () => {
-    await saveSettings({ ...settings(), hanziFont: $("#s-hanzi").value, bodyFont: $("#s-body").value, size: $("#s-size").value });
-    applyAppearance();
-  }));
   $("#s-scope").value = s.scope; $("#s-levels").style.opacity = s.scope === "selected" ? ".45" : "1";
   $("#s-dir").value = s.direction;
   const DIRNOTE = { alternate: "카드마다 중국어→한국어와 한국어→중국어(CBT, 타자 입력)가 번갈아 나옵니다.", zh_ko: "한자를 보고 뜻을 떠올린 뒤 정답을 확인합니다.", ko_zh: "뜻을 보고 중국어를 타자로 입력합니다. 맞았는지 바로 표시됩니다.", ko_zh_pbt: "뜻을 보고 손글씨로 쓴 뒤 정답과 비교해 직접 평가합니다." };
