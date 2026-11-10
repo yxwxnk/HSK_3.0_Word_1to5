@@ -16,7 +16,7 @@ const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/, HANGUL = /[\u1100-\u11f
 const queryKind = (q) => (CJK.test(q) ? "chinese" : HANGUL.test(q) ? "korean" : "latin");
 
 /* ---------------------------------------------------------------- 저장소 (IndexedDB, 실패하면 메모리) */
-const DEFAULTS = { levels: [1], perDay: 20, direction: "alternate", scope: "levels" }; // scope: levels=선택한 급수 전체, selected=내가 고른 단어만
+const DEFAULTS = { levels: [1], perDay: 20, direction: "alternate", scope: "levels", hanziFont: "song", bodyFont: "gothic", size: "normal", iv: [1, 3, 14] }; // scope: levels=선택한 급수 전체, selected=내가 고른 단어만
 let idb = null, persistent = true;
 const mem = { cards: new Map(), log: [], kv: new Map() };
 
@@ -72,6 +72,25 @@ async function removeLog(ts) {
 async function saveLog(l) { mem.log.push(l); if (idb && persistent) try { await tx("log", "readwrite", (s) => s.add(l)); } catch { persistent = false; } }
 async function saveSettings(v) { mem.kv.set("settings", v); if (idb && persistent) try { await tx("kv", "readwrite", (s) => s.put(v, "settings")); } catch { persistent = false; } }
 const settings = () => ({ ...DEFAULTS, ...(mem.kv.get("settings") || {}) });
+
+/* ---- 글꼴·글자 크기: 기기에 들어 있는 글꼴만 쓰므로 인터넷이 없어도 바뀐다. 없는 글꼴은 다음 후보로 자동 대체된다. ---- */
+const HANZI_FONTS = {
+  song: ["명조체 (宋体)", '"Songti SC","STSong","Noto Serif SC","Noto Serif CJK SC","Source Han Serif SC",serif'],
+  hei: ["고딕체 (黑体)", '"PingFang SC","Heiti SC","Hiragino Sans GB","Noto Sans SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif'],
+  kai: ["해서체 (楷体)", '"Kaiti SC","STKaiti","KaiTi","BiauKai","Noto Serif CJK SC",serif'],
+  xing: ["행서 손글씨 (行楷)", '"Xingkai SC","STXingkai","Kaiti SC","STKaiti",serif'],
+};
+const BODY_FONTS = {
+  gothic: ["고딕", '-apple-system,"Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif'],
+  myeongjo: ["명조", '"AppleMyungjo","Nanum Myeongjo","Noto Serif KR",serif'],
+};
+const SIZES = { small: ["작게", 0.92], normal: ["보통", 1], large: ["크게", 1.12], xlarge: ["아주 크게", 1.25] };
+function applyAppearance() {
+  const s = settings(), root = document.documentElement.style;
+  root.setProperty("--f-han", (HANZI_FONTS[s.hanziFont] || HANZI_FONTS.song)[1]);
+  root.setProperty("--f-body", (BODY_FONTS[s.bodyFont] || BODY_FONTS.gothic)[1]);
+  root.setProperty("--scale", String((SIZES[s.size] || SIZES.normal)[1]));
+}
 
 /* ---- 단어 목록이 2025 대강 기준으로 바뀌면서(데이터 버전 2) 예전 단어 번호(L1-0002 등)가 다른 단어를 가리키게 됐다.
    기기에 저장된 복습 기록·예문·선택을 (간체, 병음)이 같은 새 단어 번호로 옮기고, 새 목록에 없는 단어의 기록은 지우지 않고 legacy에 보관한다. ---- */
@@ -295,12 +314,17 @@ function renderDict() {
 const rev = { phase: "prompt", cur: null, skipped: new Set(), lastType: null };
 /* 평가 4가지. 간격은 '오늘 0시 + N일'로 정해, 그날 앱을 처음 여는 시각부터 다시 나온다.
    (어려움 1일 → 내일부터, 중간 3일 → 3일 뒤부터, 쉬움 14일 → 14일 뒤부터, 완벽히 외움 → 복습에서 제외) */
-const RATINGS = [
-  { n: 1, label: "어려움", sub: "1일 이내 다시", days: 1 },
-  { n: 2, label: "중간", sub: "3일 이내 다시", days: 3 },
-  { n: 3, label: "쉬움", sub: "14일 이내 다시", days: 14 },
-  { n: 4, label: "완벽히 외움", sub: "복습에서 제외", days: null },
-];
+const IV_BASE = [1, 3, 14];
+function ivDays() { const a = settings().iv || []; return [0, 1, 2].map((i) => { const v = Math.round(Number(a[i])); return v >= 1 && v <= 365 ? v : IV_BASE[i]; }); }
+function ratings() {
+  const d = ivDays();
+  return [
+    { n: 1, label: "어려움", sub: d[0] + "일 이내 다시", days: d[0] },
+    { n: 2, label: "중간", sub: d[1] + "일 이내 다시", days: d[1] },
+    { n: 3, label: "쉬움", sub: d[2] + "일 이내 다시", days: d[2] },
+    { n: 4, label: "완벽히 외움", sub: "복습에서 제외", days: null },
+  ];
+}
 function dueAfter(days) { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + days); return d.toISOString(); }
 const isMastered = (ref) => ["zh_ko", "ko_zh"].some((t) => { const c = mem.cards.get(ref + ":" + t); return c && c.done; });
 /* 복습 범위: 'selected'면 내가 고른 단어만, 아니면 설정한 급수 전체 */
@@ -326,7 +350,7 @@ function pickNext() {
   if (dueCards.length > 1) dueCards = dueCards.filter((c) => c.key !== last);
   let newCands = [];
   if (counts().newAvailable > 0) {
-    const allowed = s.direction === "zh_ko" ? ["zh_ko"] : s.direction === "ko_zh" ? ["ko_zh"] : ["zh_ko", "ko_zh"];
+    const allowed = s.direction === "zh_ko" ? ["zh_ko"] : s.direction === "ko_zh" || s.direction === "ko_zh_pbt" ? ["ko_zh"] : ["zh_ko", "ko_zh"];
     const todayWord = (ref) => ["zh_ko", "ko_zh"].some((t) => { const c = mem.cards.get(ref + ":" + t); return c && c.last_review && dayKey(new Date(c.last_review)) === today; });
     const collect = (types) => {
       const out = [];
@@ -354,7 +378,7 @@ function viewReview() {
   nextCard();
 }
 function nextCard() {
-  rev.cur = pickNext(); rev.phase = "prompt";
+  rev.cur = pickNext(); rev.phase = "prompt"; rev.typed = ""; rev.strokes = [];
   if (rev.cur) { rev.lastType = rev.cur.type; rev.lastKey = rev.cur.word.r + ":" + rev.cur.type; }
   drawReview();
 }
@@ -371,28 +395,78 @@ function drawReview() {
     const u = $("#unskip"); if (u) u.onclick = () => { rev.skipped.clear(); nextCard(); };
     return;
   }
-  const { word: w, type, isNew } = rev.cur, zk = type === "zh_ko";
+  const { word: w, type, isNew } = rev.cur, zk = type === "zh_ko", revealed = rev.phase === "revealed";
+  const mode = zk ? "zh" : settings().direction === "ko_zh_pbt" ? "pbt" : "cbt";
+  const X = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" fill="none"/></svg>';
   let h = '<div class="rv"><div class="q">' + (zk ? "이 단어의 한국어 뜻은?" : "이 뜻에 해당하는 중국어는?") + (isNew ? " · 새 카드" : "") + "</div>" +
     '<div class="prompt' + (zk ? "" : " ko") + '" lang="' + (zk ? "zh-Hans" : "ko") + '">' + (zk ? esc(w.s) + supHtml(w) : esc(w.m)) + "</div>";
-  if (rev.phase === "prompt") {
+  if (mode === "cbt") {
+    h += '<div class="qwrap"><input id="typed" type="text" lang="zh-Hans" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="여기에 중국어 입력" aria-label="답안 입력" value="' + esc(rev.typed || "") + '"' + (revealed ? " disabled" : "") + '>' +
+      '<button type="button" class="qclear" id="tclear" aria-label="입력 지우기"' + (revealed || !rev.typed ? " hidden" : "") + ">" + X + "</button></div>";
+  } else if (mode === "pbt") {
+    h += '<div class="padwrap"><canvas id="pad" aria-label="손글씨 답안 칸"></canvas><div class="padhint" id="padhint">여기에 손가락이나 펜으로 쓰세요</div></div>' +
+      '<div class="padtools"><button type="button" class="lk" id="pundo"' + (revealed ? " disabled" : "") + '>↶ 한 획 지우기</button><button type="button" class="lk" id="pclear"' + (revealed ? " disabled" : "") + ">모두 지우기</button></div>";
+  }
+  if (!revealed) {
     h += '<div class="btns"><button class="btn" id="reveal">정답 보기</button><button class="btn sec" id="skip">건너뛰기</button></div>';
   } else {
-    h += wordCard(w, "", null) + '<div class="ratings" role="group" aria-label="얼마나 잘 기억했나요?">' +
-      RATINGS.map((r) => '<button class="rate r' + r.n + '" data-r="' + r.n + '">' + r.label + "<small>" + r.sub + "</small></button>").join("") +
+    if (mode === "cbt" && rev.typed !== null) {
+      const t = rev.typed.trim(), ok = !!t && [...(w.k || []), ...(w.kt || []), w.s, w.t].includes(t);
+      h += '<div class="verdict ' + (ok ? "ok" : "bad") + '">' + (ok ? "✓ 정답입니다" : "✗ 정답과 다릅니다") + "</div>";
+    } else if (mode === "pbt") {
+      h += '<div class="mine">아래 정답과 비교해 보고 직접 평가하세요.</div>';
+    }
+    h += (zk ? wordCard(w, "", null) : '<article class="card simple"><div class="hz" lang="zh-Hans">' + esc(w.s) + supHtml(w) + '</div><p class="py">' + esc(w.p) + "</p></article>") +
+      '<div class="ratings" role="group" aria-label="얼마나 잘 기억했나요?">' +
+      ratings().map((r) => '<button class="rate r' + r.n + '" data-r="' + r.n + '">' + r.label + "<small>" + r.sub + "</small></button>").join("") +
       '</div><div class="btns" style="margin-top:12px"><button class="btn sec sm" id="skip">평가하지 않고 건너뛰기</button></div>';
   }
   a.innerHTML = h + "</div>" + undoHtml();
   const un = $("#undo"); if (un) un.onclick = undoLast;
-  const r = $("#reveal"); if (r) r.onclick = () => { rev.phase = "revealed"; drawReview(); };
+  const doReveal = () => { if (mode === "cbt" && $("#typed")) rev.typed = $("#typed").value; rev.phase = "revealed"; drawReview(); };
+  const r = $("#reveal"); if (r) r.onclick = doReveal;
+  if (mode === "cbt" && !revealed) {
+    const t = $("#typed"), c = $("#tclear");
+    t.oninput = () => { c.hidden = !t.value; };
+    t.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); doReveal(); } };
+    c.onclick = () => { t.value = ""; c.hidden = true; t.focus(); };
+    t.focus({ preventScroll: true });
+  }
+  if (mode === "pbt") setupPad(revealed);
   const sk = $("#skip"); if (sk) sk.onclick = () => { rev.skipped.add(w.r + ":" + type); nextCard(); };
   a.querySelectorAll(".rate").forEach((b) => (b.onclick = () => rate(Number(b.dataset.r))));
+}
+/* 손글씨 답안 칸 (PBT): 쓴 글씨는 정답 보기 전까지만 남고, 자동 채점은 하지 않는다 */
+let cv, cx, dpr = 1, drawing = null;
+const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function setupPad(locked) {
+  cv = $("#pad"); dpr = window.devicePixelRatio || 1;
+  const r = cv.getBoundingClientRect(); cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  cx = cv.getContext("2d"); cx.scale(dpr, dpr); padRedraw();
+  const sync = () => { $("#pundo").disabled = locked || !rev.strokes.length; $("#pclear").disabled = locked || !rev.strokes.length; $("#padhint").style.display = rev.strokes.length ? "none" : "flex"; };
+  sync();
+  if (locked) return;
+  const pt = (e) => { const b = cv.getBoundingClientRect(); return [e.clientX - b.left, e.clientY - b.top]; };
+  cv.addEventListener("pointerdown", (e) => { cv.setPointerCapture(e.pointerId); drawing = [pt(e)]; rev.strokes.push(drawing); sync(); padRedraw(); });
+  cv.addEventListener("pointermove", (e) => { if (!drawing) return; drawing.push(pt(e)); padRedraw(); });
+  const end = () => { drawing = null; sync(); };
+  cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+  $("#pundo").onclick = () => { rev.strokes.pop(); padRedraw(); sync(); };
+  $("#pclear").onclick = () => { rev.strokes = []; padRedraw(); sync(); };
+}
+function padRedraw() {
+  const w = cv.width / dpr, h = cv.height / dpr; cx.clearRect(0, 0, w, h);
+  cx.strokeStyle = cssVar("--line"); cx.lineWidth = 1; cx.setLineDash([5, 5]);
+  cx.beginPath(); cx.moveTo(0, h / 2); cx.lineTo(w, h / 2); cx.moveTo(w / 2, 0); cx.lineTo(w / 2, h); cx.stroke(); cx.setLineDash([]);
+  cx.strokeStyle = cssVar("--fg"); cx.lineWidth = 4.5; cx.lineCap = "round"; cx.lineJoin = "round";
+  rev.strokes.forEach((s) => { cx.beginPath(); s.forEach(([x, y], i) => (i ? cx.lineTo(x, y) : cx.moveTo(x, y))); if (s.length === 1) cx.lineTo(s[0][0] + 0.1, s[0][1]); cx.stroke(); });
 }
 let rating = false;
 async function rate(n) {
   if (rating || !rev.cur || rev.phase !== "revealed") return;
   rating = true;
   try {
-    const { word, type, card } = rev.cur, now = new Date(), key = word.r + ":" + type, r = RATINGS[n - 1];
+    const { word, type, card } = rev.cur, now = new Date(), key = word.r + ":" + type, r = ratings()[n - 1];
     const saved = { ...(card || {}), key, ref: word.r, type, created: card ? card.created : now.toISOString(),
       due: r.days ? dueAfter(r.days) : now.toISOString(), last_review: now.toISOString(), reps: ((card && card.reps) || 0) + 1, done: n === 4, interval_days: r.days || 0 };
     await saveCard(saved);
@@ -407,7 +481,7 @@ async function undoLast() {
   const key = u.word.r + ":" + u.type;
   if (u.prev) await saveCard(u.prev); else await deleteCard(key);
   await removeLog(u.ts);
-  rev.undo = null; rev.cur = { word: u.word, type: u.type, isNew: !u.prev, card: u.prev }; rev.phase = "revealed"; drawReview();
+  rev.undo = null; rev.cur = { word: u.word, type: u.type, isNew: !u.prev, card: u.prev }; rev.phase = "revealed"; rev.typed = null; rev.strokes = []; drawReview();
 }
 document.addEventListener("keydown", (e) => {
   if (currentTab !== "review" || !rev.cur) return;
@@ -433,18 +507,34 @@ function viewStats() {
     '<div class="stat"><b>' + learning + '</b>복습 중인 카드</div><div class="stat"><b>' + mastered + '</b>완벽히 외운 카드</div></div>' +
     (mastered ? '<div class="row"><span>완벽히 외운 카드 ' + mastered + '개를 복습에 다시 포함</span><button type="button" class="btn sec sm" id="unmaster">되돌리기</button></div>' : "") +
     '<h2>최근 14일 복습 수</h2><div class="bars" role="img" aria-label="최근 14일 복습 수">' + days.map((d) => '<div title="' + d + ": " + perDay[d] + '회" style="height:' + Math.max(2, Math.round(100 * perDay[d] / max)) + '%"></div>').join("") + "</div>" +
+    '<h2>화면 설정</h2>' +
+    '<div class="row"><label for="s-hanzi">한자 글꼴</label><select id="s-hanzi">' + Object.entries(HANZI_FONTS).map(([k, v]) => '<option value="' + k + '">' + v[0] + "</option>").join("") + "</select></div>" +
+    '<div class="row"><label for="s-body">한글·본문 글꼴</label><select id="s-body">' + Object.entries(BODY_FONTS).map(([k, v]) => '<option value="' + k + '">' + v[0] + "</option>").join("") + "</select></div>" +
+    '<div class="row"><label for="s-size">글자 크기</label><select id="s-size">' + Object.entries(SIZES).map(([k, v]) => '<option value="' + k + '">' + v[0] + "</option>").join("") + "</select></div>" +
+    '<div class="card" style="margin-top:10px"><div class="head"><span class="hz" lang="zh-Hans">爱好</span><span class="tr" lang="zh-Hant">愛好</span></div><p class="py">àihào</p><p class="mean">좋아하다, 취미 · 글꼴 미리보기</p></div>' +
+    '<div class="small muted">글꼴은 이 기기에 들어 있는 것만 쓸 수 있어서, 기기에 없는 글꼴을 고르면 비슷한 다른 글꼴로 보일 수 있습니다. 위 미리보기로 확인하세요.</div>' +
     '<h2>학습 설정</h2>' +
     '<div class="row"><label for="s-perday">하루 새 카드 수</label><input id="s-perday" type="number" min="0" max="200" value="' + s.perDay + '"></div>' +
     '<div class="row"><label for="s-scope">복습 범위</label><select id="s-scope"><option value="levels">선택한 급수 전체</option><option value="selected">내가 고른 단어만 (' + selectedCount() + '개)</option></select></div>' +
-    '<div class="row"><label for="s-dir">카드 방향</label><select id="s-dir"><option value="alternate">번갈아</option><option value="zh_ko">중국어 → 한국어만</option><option value="ko_zh">한국어 → 중국어만</option></select></div>' +
+    '<div class="row"><label for="s-dir">카드 방향</label><select id="s-dir"><option value="alternate">번갈아 (중→한 / 한→중 CBT)</option><option value="zh_ko">중국어 → 한국어만</option><option value="ko_zh">한국어 → 중국어 (CBT · 문자 입력)</option><option value="ko_zh_pbt">한국어 → 중국어 (PBT · 손글씨)</option></select></div>' +
+    '<div class="small muted" id="s-dirnote" style="margin:4px 0 0"></div>' +
     '<div class="row"><span>새 카드로 학습할 급수 <span class="small muted">(범위가 ‘급수 전체’일 때)</span></span><span class="chips" id="s-levels"></span></div>' +
     '<div class="msg muted" id="s-msg"></div>' +
+    '<h2>복습 주기</h2><p class="small muted" style="margin:0 0 4px">평가 버튼을 눌렀을 때 몇 일 뒤에 다시 보여 줄지 정합니다 (1~365일). 완벽히 외움은 복습에서 제외됩니다.</p>' +
+    [["어려움", 0], ["중간", 1], ["쉬움", 2]].map(([l, i]) => '<div class="row"><label for="s-iv' + i + '">' + l + '</label><span><input id="s-iv' + i + '" type="number" inputmode="numeric" min="1" max="365" value="' + ivDays()[i] + '"> 일 이내 다시</span></div>').join("") +
     '<h2>백업</h2><p class="small muted">복습 기록은 이 기기에만 저장됩니다. 기기를 바꾸거나 사파리 데이터를 지우기 전에 내보내기로 파일을 보관하세요.</p>' +
     '<div class="btns" style="justify-content:flex-start"><button class="btn sec" id="export">기록 내보내기</button><label class="btn sec" for="import" style="cursor:pointer">기록 가져오기</label><input id="import" type="file" accept="application/json,.json" hidden></div>' +
     '<div class="msg" id="b-msg" role="status"></div>' +
     '<p class="small muted" style="margin-top:22px">단어 데이터: HSK 3.0 1–5급 ' + WORDS.length.toLocaleString() + "개 (HSK 考试大纲, 中外语言交流合作中心 2025-11 발표 · 2026-07 시행). 한국어 뜻·한자음·훈음은 직접 제공한 엑셀 데이터이며 외부 사전·원문과 대조하지 않았습니다. 복습 간격: 어려움 1일 · 중간 3일 · 쉬움 14일 이내에 다시 나오고, 완벽히 외움은 복습에서 제외됩니다.</p>";
+  $("#s-hanzi").value = s.hanziFont; $("#s-body").value = s.bodyFont; $("#s-size").value = s.size;
+  ["#s-hanzi", "#s-body", "#s-size"].forEach((id) => $(id).addEventListener("change", async () => {
+    await saveSettings({ ...settings(), hanziFont: $("#s-hanzi").value, bodyFont: $("#s-body").value, size: $("#s-size").value });
+    applyAppearance();
+  }));
   $("#s-scope").value = s.scope; $("#s-levels").style.opacity = s.scope === "selected" ? ".45" : "1";
   $("#s-dir").value = s.direction;
+  const DIRNOTE = { alternate: "카드마다 중국어→한국어와 한국어→중국어(CBT, 타자 입력)가 번갈아 나옵니다.", zh_ko: "한자를 보고 뜻을 떠올린 뒤 정답을 확인합니다.", ko_zh: "뜻을 보고 중국어를 타자로 입력합니다. 맞았는지 바로 표시됩니다.", ko_zh_pbt: "뜻을 보고 손글씨로 쓴 뒤 정답과 비교해 직접 평가합니다." };
+  const dn = () => { $("#s-dirnote").textContent = DIRNOTE[$("#s-dir").value] || ""; }; dn(); $("#s-dir").addEventListener("change", dn);
   const um = $("#unmaster"); if (um) um.onclick = async () => {
     if (um.dataset.sure !== "1") { um.dataset.sure = "1"; um.textContent = "한 번 더 누르면 되돌립니다"; return; }
     for (const c of [...mem.cards.values()].filter((x) => x.done)) await saveCard({ ...c, done: false, due: new Date().toISOString() });
@@ -453,7 +543,8 @@ function viewStats() {
   const save = async () => {
     const levels = [...document.querySelectorAll("#s-levels .chip")].filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => Number(b.dataset.l));
     const perDayV = Math.max(0, Math.min(200, parseInt($("#s-perday").value, 10) || 0));
-    await saveSettings({ levels: levels.length ? levels : [1], perDay: perDayV, direction: $("#s-dir").value, scope: $("#s-scope").value });
+    await saveSettings({ ...settings(), levels: levels.length ? levels : [1], perDay: perDayV, direction: $("#s-dir").value, scope: $("#s-scope").value, iv: [0, 1, 2].map((i) => Math.max(1, Math.min(365, Math.round(Number($("#s-iv" + i).value)) || IV_BASE[i]))) });
+    [0, 1, 2].forEach((i) => { $("#s-iv" + i).value = ivDays()[i]; });
     $("#s-levels").style.opacity = $("#s-scope").value === "selected" ? ".45" : "1";
     $("#s-msg").textContent = "저장했습니다.";
   };
@@ -463,7 +554,7 @@ function viewStats() {
     b.onclick = () => { b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true")); save(); };
     $("#s-levels").append(b);
   });
-  ["#s-perday", "#s-scope", "#s-dir"].forEach((id) => $(id).addEventListener("change", save));
+  ["#s-perday", "#s-scope", "#s-dir", "#s-iv0", "#s-iv1", "#s-iv2"].forEach((id) => $(id).addEventListener("change", save));
   $("#export").onclick = exportData;
   fillStorageExtras();
   const nok = $("#notice-ok"); if (nok) nok.onclick = async () => { await putKv("notice", ""); $("#notice").remove(); };
@@ -584,6 +675,7 @@ document.querySelectorAll("nav button").forEach((b) => (b.onclick = () => show(b
   WORDS.forEach((w) => byRef.set(w.r, w));
   await loadAll();
   await migrateIfNeeded();
+  applyAppearance();
   let tab = "dict"; try { tab = localStorage.getItem("hanyu-tab") || "dict"; } catch { /* 무시 */ }
   show(["dict", "review", "stats"].includes(tab) ? tab : "dict");
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
