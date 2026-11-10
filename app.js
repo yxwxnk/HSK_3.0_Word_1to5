@@ -398,8 +398,10 @@ function drawReview() {
   const { word: w, type, isNew } = rev.cur, zk = type === "zh_ko", revealed = rev.phase === "revealed";
   const mode = zk ? "zh" : settings().direction === "ko_zh_pbt" ? "pbt" : "cbt";
   const X = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" fill="none"/></svg>';
-  let h = '<div class="rv"><div class="q">' + (zk ? "이 단어의 한국어 뜻은?" : "이 뜻에 해당하는 중국어는?") + (isNew ? " · 새 카드" : "") + "</div>" +
-    '<div class="prompt' + (zk ? "" : " ko") + '" lang="' + (zk ? "zh-Hans" : "ko") + '">' + (zk ? esc(w.s) + supHtml(w) : esc(w.m)) + "</div>";
+  let h = '<div class="rv"><div class="q">' + (zk ? "이 단어의 한국어 뜻은?" : '이 뜻에 해당하는 <em>중국어</em>를 ' + (mode === "pbt" ? "손으로 쓰세요" : "입력하세요")) + "</div>" +
+    '<div class="prompt' + (zk ? "" : " ko") + '" lang="' + (zk ? "zh-Hans" : "ko") + '">' + (zk ? esc(w.s) + supHtml(w) : esc(w.m)) + "</div>" +
+    (zk ? "" : '<div class="meta">' + (w.pos ? '<span class="tag">' + esc(w.pos) + "</span>" : "") + '<span class="tag hsk">HSK ' + w.h + "</span></div>" +
+      '<div class="ans-label"><span>답안</span><span class="mode">' + (mode === "pbt" ? "PBT · 손글씨" : "CBT · 문자 입력") + "</span></div>");
   if (mode === "cbt") {
     h += '<div class="qwrap"><input id="typed" type="text" lang="zh-Hans" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="여기에 중국어 입력" aria-label="답안 입력" value="' + esc(rev.typed || "") + '"' + (revealed ? " disabled" : "") + '>' +
       '<button type="button" class="qclear" id="tclear" aria-label="입력 지우기"' + (revealed || !rev.typed ? " hidden" : "") + ">" + X + "</button></div>";
